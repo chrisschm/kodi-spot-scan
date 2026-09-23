@@ -1,0 +1,9 @@
+[Description("")]
+[FormDesignerId("5573AB8B-3E8D-408B-8EBD-44AFE5918815")]
+[PredeclaredId]
+Class frmMain
+
+    Sub New()
+    End Sub
+    
+End Class

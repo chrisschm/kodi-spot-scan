@@ -1,0 +1,48 @@
+@echo off
+REM Exports the twinBASIC project to text form under src/, for version control.
+REM twinBASIC's `export` command always creates a subfolder named after the project inside the
+REM given target folder (e.g. src\kodi-spot-scan\...) instead of exporting directly into it -
+REM this script flattens that back out so the result always lands directly under src\.
+REM
+REM src\ is wiped before each export, so the result is always a clean, full regenerate - renaming
+REM or deleting an object in the IDE won't leave stale files (under its old name) behind in src\.
+REM
+REM This is a template: copy it to export.bat (which is gitignored, since the paths below are
+REM specific to your machine) and fill in TB_EXE and TWINPROJ for your setup.
+
+setlocal enabledelayedexpansion
+
+set "TB_EXE=C:\Program Files (x86)\twinBASIC\bin\twinBASIC_win64.exe"
+set "TWINPROJ=C:\path\to\kodi-spot-scan.twinproj"
+set "PROJECT_NAME=kodi-spot-scan"
+set "TARGET=%~dp0src"
+
+if not exist "!TB_EXE!" (
+    echo TB_EXE not found: !TB_EXE!
+    echo Edit export.bat and set the correct path to your twinBASIC executable.
+    exit /b 1
+)
+if not exist "!TWINPROJ!" (
+    echo TWINPROJ not found: !TWINPROJ!
+    echo Edit export.bat and set the correct path to your .twinproj file.
+    exit /b 1
+)
+
+if exist "!TARGET!" (
+    rmdir /s /q "!TARGET!"
+)
+
+"!TB_EXE!" export "!TWINPROJ!" "!TARGET!" --overwrite
+if errorlevel 1 (
+    echo Export failed.
+    exit /b 1
+)
+
+REM Flatten TARGET\PROJECT_NAME\* up into TARGET\
+if exist "!TARGET!\!PROJECT_NAME!" (
+    robocopy "!TARGET!\!PROJECT_NAME!" "!TARGET!" /E /MOVE /NFL /NDL /NJH /NJS
+    rmdir "!TARGET!\!PROJECT_NAME!" 2>nul
+)
+
+echo Done. Exported to !TARGET!
+endlocal

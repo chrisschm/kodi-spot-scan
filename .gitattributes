@@ -1,0 +1,13 @@
+# Normalize text files to LF in the repository itself (protects against mixed line endings and
+# cross-platform commit noise), but otherwise leave working-tree checkout behavior to each
+# contributor's own core.autocrlf - this deliberately does NOT force eol=lf, so it doesn't
+# override the Windows-typical core.autocrlf=true default (which already checks text files out
+# as CRLF).
+* text=auto
+
+# twinBASIC's exported project files and the Windows batch script are Windows-native tooling -
+# always check these out with CRLF, regardless of a contributor's core.autocrlf, since that's
+# what the twinBASIC IDE and Windows batch interpreter expect.
+*.bat text eol=crlf
+*.twin text eol=crlf
+*.tbform text eol=crlf

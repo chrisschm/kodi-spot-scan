@@ -1,0 +1,24 @@
+# twinBASIC build output
+Build/
+
+# twinBASIC export: vendored/regeneratable package + type library copies.
+# `export` bundles full copies of every referenced compiler package (VB/VBA/VBRUN
+# compatibility layers, WinNativeCommonCtls, etc.) into the exported tree - this is not
+# project-specific source, it's twinBASIC's own framework code, resolved again from the local
+# package cache on import. Only Sources/, Settings, Resources/ and References/ are the
+# project's own content.
+# Confirmed (2026-09-23): importing from a src/ tree with these folders empty still resolves
+# the referenced packages cleanly from twinBASIC's own central package store on import.
+src/Packages/
+src/ImportedTypeLibraries/
+
+# Machine-specific export script (contains local paths to the twinBASIC install and the
+# .twinproj file). Copy export.bat.example to export.bat and fill in the paths for your own
+# machine. Bringing changes back into the .twinproj works through the IDE instead (see
+# docs/ARCHITECTURE.md), so there is no import.bat.
+export.bat
+
+# OS cruft
+Thumbs.db
+desktop.ini
+.DS_Store
