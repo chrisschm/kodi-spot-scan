@@ -1,0 +1,1 @@
+# kodi-spot-scan
