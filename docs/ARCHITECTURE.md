@@ -30,8 +30,10 @@ twinBASIC's Project Explorer shows standard modules and class modules with the s
 |---|---|---|
 | `modAppConfig` | Standard module | Loads/saves settings (watched shares, poll interval, Kodi target host/port) from the INI file under `%APPDATA%\kodi-spot-scan\`. No per-instance state, so a module rather than a class. |
 | `modPathTranslator` | Standard module | Pure conversion between the Windows UNC path the watcher sees (`\\server\share\...`) and the `smb://` path Kodi's JSON-RPC API expects (`smb://server/share/...`). Kept isolated because it's the piece most likely to need a fix for an edge case (special characters in a title) without touching anything else. Stateless, so a module. |
+| `modScanWorker` | Standard module | The file system walk of `clsShareWatcher`, run in a background thread (`CreateThread` + `AddressOf`, hence a standard module). Delivers per share a flat list of `.nfo` paths, timestamps and target folders. See "Background scan thread" below. |
 | `clsShareWatcher` | Class module | Periodically polls the configured shares for new/changed `.nfo` files, tracks (path, last-modified) state on disk so a restart doesn't re-flag everything, and raises an event per detected folder. Needs a class module for the event and the per-instance state. |
 | `clsKodiClient` | Class module | Wraps the JSON-RPC HTTP call to Kodi (`VideoLibrary.Scan`, plus a connectivity check) against a configured host/port. |
+| `modStrings` | Standard module | Access to the localized UI strings (`Res(id, args...)` with `%1`-style placeholders) and the `ResId` enum mirroring `Resources/STRING/Strings.json`. See "Localization" below. |
 | `frmMain` | Form | Live list of detected folders (path, detected-at, status) with multi-select and an explicit "send to Kodi" action, plus a short status/history log. |
 | `frmSettings` | Form | Edits watched shares, poll interval, and the Kodi target; includes a "test connection" action. |
 
@@ -95,12 +97,129 @@ though, in this maintainer's non-domain setup, Roaming vs. Local makes no practi
 The same folder holds the watcher's persisted "last seen" state and a short send history/log,
 so everything the tool keeps lives in one place that's easy to inspect or reset.
 
+### Watcher details: baseline, TV shows, failure handling
+
+- **Silent baseline.** The first poll of a share without persisted state only records the
+  `.nfo` files that exist, without flagging anything - otherwise the whole library would show
+  up as "new" on first start (or after adding a share). The state (path -> last-write time) is
+  persisted after every poll, so a restart doesn't re-flag anything either.
+- **TV shows are reported at show level.** Below a folder containing a `tvshow.nfo`, a
+  new/changed episode or season `.nfo` flags the *show* folder, not the season folder: that's
+  the level Kodi's TV show scanner works on, and several changed episodes collapse into one
+  targeted scan. Movies are reported as the folder containing the `.nfo`.
+- **A share is only ever updated from a complete walk.** If a share is unreachable, or any
+  folder in it fails to enumerate mid-walk, that share's poll is abandoned and its state left
+  untouched. A flaky connection therefore never turns into "everything deleted" followed by
+  "everything new" on the next poll.
+- **Deletions are not events.** A vanished `.nfo` is just dropped from the state; removing
+  items from the library is Kodi's "clean", not a targeted scan.
+- **Skipped folders:** reparse points (avoids loops), hidden+system folders, and NAS
+  housekeeping folders (names starting with `@` such as Synology's `@eaDir`, `#recycle`,
+  `#snapshot`, `$RECYCLE.BIN`).
+- **Enumeration** uses `FindFirstFileExW` (basic info level, large fetch), which returns the
+  last-write time with the directory listing - no per-file round trip over SMB.
+- **No timer in the watcher class.** `frmMain`'s timer starts polls (`clsShareWatcher.Poll`,
+  returns immediately) and pumps the watcher every 250 ms (`Pump`), which delivers the results
+  once the background walk is done.
+- **Detected-but-unsent folders are not persisted** (consistent with "no persisted approval
+  queue" above): the watcher's state advances on detection, so a folder that was detected but
+  not sent before closing the tool won't reappear by itself.
+
+### Background scan thread
+
+Walking large shares over SMB takes tens of seconds (about 20 s for ~1000 `.nfo` files in
+the maintainer's setup), and a single call against an unreachable server can block for the
+whole SMB timeout. Done on the UI thread this froze the window ("Not responding"), so the
+walk runs in its own thread:
+
+- **Only the I/O moves to the worker** (`modScanWorker`): Win32 API calls, plain strings and
+  module-level arrays - no COM objects, no forms, no events, no localized strings, no code
+  path that can raise an error. Per share it returns `.nfo` path, timestamp and the folder
+  Kodi should scan (show folder below a `tvshow.nfo`), or an error status.
+- **Everything else stays on the UI thread** (`clsShareWatcher`): comparison with the
+  persisted state, baseline, events, saving. That's in-memory work of milliseconds.
+- **Hand-over without shared mutable state:** the UI thread fills the inputs and starts the
+  thread; the worker writes its results and finally sets a "finished" flag. The UI thread
+  reads results only after seeing that flag, then releases them. Flags are accessed via
+  `InterlockedExchange`/`InterlockedCompareExchange` only (kernel32 exports on x86 - fine,
+  builds are 32-bit). No subclassing or window messages needed: `frmMain`'s timer polls.
+- **Cancel and shutdown:** a cancel flag is checked by the worker per folder and every 256
+  directory entries. On close the form cancels and waits up to 3 s; if the worker is stuck in
+  an SMB timeout the form closes anyway - the result buffers are never freed while the worker
+  may still write to them, and the process end stops the thread.
+- Verified before the switch with a stand-alone twinBASIC test (IDE and compiled EXE): two
+  workers walking the same share in parallel while the UI thread did string work - identical
+  results, no errors.
+
+### File formats in the settings folder
+
+- `kodi-spot-scan.ini` - UTF-16LE with BOM, read/written with the `*PrivateProfileStringW`
+  APIs (they only keep non-ASCII characters, e.g. in share paths, in a file that already
+  starts with a UTF-16LE BOM).
+- `watcher-state.txt` - UTF-16LE with BOM, one tab-separated line per baselined share and per
+  known `.nfo`, written to a `.tmp` file first and then swapped in. Deleting it just causes a
+  silent re-baseline.
+
+### Localization: string table resource, Windows picks the language
+
+All user-visible text lives in the twinBASIC string table `src/Resources/STRING/Strings.json`
+(one entry per string, one `LCID_xxxx` column per language) and is loaded through
+`modStrings.Res`. Windows selects the column matching the display language at runtime, so
+there's no language setting in the tool itself.
+
+- `LCID_0000` is English and doubles as the neutral fallback for every language without its
+  own column; `LCID_0407` is German. Only full LCIDs work - a primary-language-only column
+  (`LCID_0007`) was tested and is *not* picked up for a de-DE system.
+- JSON has no comments, so entry 1 (`Readme_LanguageColumns`) explains the table to
+  translators - in each language's own column.
+- Naming: `<Area>_<Element>_<Property>` (e.g. `frmMain_cmdSend_Caption`; areas are the form
+  names, `App`, `Msg`, `Err`), mirrored in `modStrings.ResId` with the prefix `rid_`. The JSON
+  `name` field has no function yet; it's meant for twinBASIC's planned named access
+  (`Resources.Strings.<name>`). Until then the enum is kept in sync by hand.
+- ID ranges: 1-99 meta, 100-199 application, 1000-1999 `frmMain`, 2000-2999 `frmSettings`,
+  3000-3999 log/status messages, 4000-4999 error messages.
+- Captions set in the form designer are placeholders only; every form sets its real captions
+  in `Form_Load` (`ApplyCaptions`).
+
+### No ActiveX/OCX dependencies
+
+The status bar in `frmMain` is the native Win32 one (`msctls_statusbar32` from `comctl32`,
+part of Windows), created via API, instead of the `MSComctlLib.StatusBar` from
+`mscomctl.ocx`: that OCX isn't part of Windows (it would need an admin-installed, registered
+copy on every target PC) and only exists as 32-bit. Controls come from twinBASIC's own
+packages or the Windows API only.
+
 ### No credential handling
 
 The current setup assumes trusted, unauthenticated (or already OS-level authenticated) access to
 both the watched shares and the target Kodi instance's JSON-RPC endpoint — `kodi-spot-scan` never
 stores or transmits a password. If a future setup needs authenticated access to either, that
 should be designed in deliberately (see `SECURITY.md`) rather than added ad hoc.
+
+## Windows version compatibility
+
+Supported (and stated in the README) is **Windows 7 or later**, 32-bit builds only. Beyond
+that, the code deliberately stays compatible back to Windows XP wherever that's cheap - this is
+a developer-side goal, not a user-facing promise, so it's documented here and in code comments
+only, never in the README or user-facing wiki.
+
+- **Feature test with fallback, no version checks.** Newer APIs or flags are tried first; if
+  the call fails because the feature doesn't exist, the code falls back to an older
+  equivalent. Code comments name the Windows version each variant needs.
+- Current cases:
+  - `modScanWorker.FindFirst`: `FindFirstFileExW` with `FindExInfoBasic` +
+    `FIND_FIRST_EX_LARGE_FETCH` (Windows 7+); on `ERROR_INVALID_PARAMETER` it switches once to
+    the standard call (Windows XP/Vista).
+  - Planned share picker: `IFileOpenDialog` with `FOS_PICKFOLDERS` (Vista+), falling back to
+    `SHBrowseForFolderW` with an edit box (XP).
+- **If compatibility can't be kept** for a feature (no reasonable fallback), the minimum
+  Windows version is raised *in the build* - the EXE's OS/subsystem version in the PE header,
+  so older Windows refuses to start it cleanly - instead of letting it fail at runtime. That
+  change and the reason go into this section and the changelog.
+- twinBASIC exposes this directly as the project setting **Target OS Version** (sets
+  `MajorOperatingSystemVersion`/`MajorSubsystemVersion` etc. in the PE optional header; choices
+  from Windows 2000 up to Windows 10). The project currently uses the compiler default,
+  Windows XP (v5.1).
 
 ## Known limitation: no CI build
 

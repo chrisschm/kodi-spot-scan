@@ -61,7 +61,7 @@
 	"project.versionMajor": 0,
 	"project.versionMinor": 1,
 	"project.versionProductName": "kodi-spot-scan",
-	"project.versionRevision": 1,
+	"project.versionRevision": 3,
 	"project.warnings": {
 		"errors": [],
 		"hints": [],

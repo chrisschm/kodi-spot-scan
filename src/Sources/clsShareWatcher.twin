@@ -1,5 +1,444 @@
 Class clsShareWatcher
 
-	' add your member fields and procedures here
+	' Polls the configured shares for new/changed .nfo files and raises one event per
+	' detected folder. See "Polling instead of filesystem change notifications",
+	' "'.nfo' files are the only trigger" and "Background scan thread" in
+	' docs/ARCHITECTURE.md.
+	'
+	' Usage (frmMain):
+	'   Set m_Watcher = New clsShareWatcher
+	'   m_Watcher.StateFilePath = modAppConfig.StateFilePath()   ' loads persisted state
+	'   m_Watcher.SetShares modAppConfig.Shares
+	'   ... when a poll is due:   m_Watcher.Poll       (returns at once)
+	'   ... on every timer tick:  m_Watcher.Pump       (delivers the results when ready)
+	' The class has no timer of its own - poll cadence and pumping are driven by the caller.
+	'
+	' The file system walk runs in a background thread (modScanWorker); this class only
+	' starts it and, once it has finished, compares its results with the persisted state -
+	' on the UI thread, so all events fire there.
+	'
+	' Behaviour:
+	' - Baseline: the first poll of a share that has no persisted state only records what's
+	'   there, without raising events - otherwise the whole library would be flagged on
+	'   first start. The state (nfo path -> last-write time) is persisted after each poll,
+	'   so a restart doesn't re-flag anything either.
+	' - Detected folder: the folder containing the new/changed .nfo - except below a folder
+	'   that contains a tvshow.nfo, where the TV show folder is reported instead (episode
+	'   and season changes map to one targeted scan of the show, which is the level Kodi's
+	'   TV show scanner works on). The mapping is done by the worker.
+	' - A share that is unreachable, or a folder that fails to enumerate mid-walk, leaves that
+	'   share's state untouched (raises ShareError). Only a complete walk updates the state,
+	'   so a flaky connection never turns into "everything deleted" followed by
+	'   "everything new".
+	' - Deleted .nfo files are silently dropped from the state (no event - removing items
+	'   from the library is Kodi's "clean", not a targeted scan).
+	' - Poll while a poll is running is ignored; CancelPoll stops the current one (shares not
+	'   walked completely are discarded). SetShares during a poll cancels it and is applied
+	'   when it has ended.
+
+	Public Event FolderDetected(ByVal FolderPath As String, ByVal IsNew As Boolean)
+	Public Event ShareError(ByVal SharePath As String, ByVal Message As String)
+	' Cancelled = True: CancelPoll/SetShares/ResetState stopped the poll (or it could not be
+	' started); shares not walked completely were left untouched.
+	Public Event PollCompleted(ByVal FoldersDetected As Long, ByVal NfoFilesSeen As Long, ByVal Cancelled As Boolean)
+	' First (silent) poll of a share: its current state was recorded, nothing flagged.
+	Public Event BaselineCreated(ByVal SharePath As String, ByVal NfoFiles As Long)
+
+	Private Const STATE_HEADER As String = "# kodi-spot-scan watcher state v1"
+	Private Const DICT_TEXT_COMPARE As Long = 1
+
+	' configuration / persisted state
+	Private m_Shares As Collection         ' normalized share roots (no trailing backslash)
+	Private m_PendingShares As Collection  ' SetShares received during a poll
+	Private m_State As Object              ' Scripting.Dictionary: nfo path -> stamp
+	Private m_Baselined As Object          ' Scripting.Dictionary: share root -> True
+	Private m_StateFile As String
+	Private m_StateDirty As Boolean
+
+	Private m_Busy As Boolean              ' a scan was started and its results not yet processed
+
+	Private Sub Class_Initialize()
+		Set m_Shares = New Collection
+		Set m_State = NewDictionary()
+		Set m_Baselined = NewDictionary()
+	End Sub
+
+	Private Sub Class_Terminate()
+		' Never free the worker's buffers while it may still write to them: if it hasn't
+		' finished, only ask it to stop (the process end takes care of the rest).
+		If m_Busy Then
+			modScanWorker.RequestCancel
+			If modScanWorker.IsFinished() Then modScanWorker.EndScan
+		End If
+	End Sub
+
+	' ---------------------------------------------------------------------------------
+	' Configuration
+	' ---------------------------------------------------------------------------------
+
+	Public Property Get StateFilePath() As String
+		StateFilePath = m_StateFile
+	End Property
+
+	' Setting the path (re)loads the persisted state from it.
+	Public Property Let StateFilePath(ByVal value As String)
+		m_StateFile = value
+		LoadState
+	End Property
+
+	' Replaces the list of watched shares (a Collection of path strings). State of shares
+	' that are no longer watched is dropped; a newly added share gets a silent baseline on
+	' its first poll. During a poll, only an actually changed list cancels it (and is applied
+	' when it has ended) - an unchanged list (e.g. only the Kodi target was edited) lets the
+	' running poll finish.
+	Public Sub SetShares(ByVal shares As Collection)
+		Dim share As Variant, root As String, k As Variant
+
+		If m_Busy Then
+			If SameShares(shares) Then
+				Set m_PendingShares = Nothing
+			Else
+				Set m_PendingShares = shares
+				modScanWorker.RequestCancel
+			End If
+			Exit Sub
+		End If
+
+		Set m_Shares = New Collection
+		If Not shares Is Nothing Then
+			For Each share In shares
+				root = modPathTranslator.NormalizeFolder(CStr(share))
+				If Len(root) > 0 And Not ContainsText(m_Shares, root) Then m_Shares.Add root
+			Next
+		End If
+
+		For Each k In m_State.Keys
+			If Not IsUnderAnyShare(CStr(k)) Then
+				m_State.Remove k
+				m_StateDirty = True
+			End If
+		Next
+		For Each k In m_Baselined.Keys
+			If Not ContainsText(m_Shares, CStr(k)) Then
+				m_Baselined.Remove k
+				m_StateDirty = True
+			End If
+		Next
+		If m_StateDirty Then SaveState
+	End Sub
+
+	Public Property Get ShareCount() As Long
+		ShareCount = m_Shares.Count
+	End Property
+
+	Public Property Get IsPolling() As Boolean
+		IsPolling = m_Busy
+	End Property
+
+	' .nfo files found so far by the running poll (0 when idle).
+	Public Property Get ProgressNfoCount() As Long
+		If m_Busy Then ProgressNfoCount = modScanWorker.ProgressNfoCount()
+	End Property
+
+	' Forgets everything known about all shares; the next poll re-baselines silently.
+	Public Sub ResetState()
+		If m_Busy Then modScanWorker.RequestCancel
+		Set m_State = NewDictionary()
+		Set m_Baselined = NewDictionary()
+		m_StateDirty = True
+		SaveState
+	End Sub
+
+	' ---------------------------------------------------------------------------------
+	' Polling
+	' ---------------------------------------------------------------------------------
+
+	' Starts a poll of all shares in the background and returns at once. The results are
+	' delivered by Pump (FolderDetected / BaselineCreated / ShareError, then PollCompleted).
+	Public Sub Poll()
+		If m_Busy Then Exit Sub
+		If m_Shares.Count = 0 Then Exit Sub
+		If Not modScanWorker.StartScan(m_Shares) Then
+			RaiseEvent ShareError("", Res(rid_Err_ScanThreadFailed))
+			RaiseEvent PollCompleted(0, 0, True)
+			Exit Sub
+		End If
+		m_Busy = True
+	End Sub
+
+	' Call regularly from the UI thread. Once the background walk has finished, compares
+	' its results with the state and raises the events.
+	Public Sub Pump()
+		If Not m_Busy Then Exit Sub
+		If Not modScanWorker.IsFinished() Then Exit Sub
+		ProcessResults
+	End Sub
+
+	Public Sub CancelPoll()
+		If m_Busy Then modScanWorker.RequestCancel
+	End Sub
+
+	' For shutdown: waits up to timeoutMs for the background walk to end. True if it has.
+	Public Function WaitForPollEnd(ByVal timeoutMs As Long) As Boolean
+		If Not m_Busy Then
+			WaitForPollEnd = True
+		Else
+			WaitForPollEnd = modScanWorker.WaitForWorker(timeoutMs)
+		End If
+	End Function
+
+	Private Sub ProcessResults()
+		Dim s As Long, total As Long, nfoTotal As Long, cancelled As Boolean
+		Dim pending As Collection
+
+		On Error GoTo Failed
+		cancelled = modScanWorker.CancelRequested()
+		For s = 0 To modScanWorker.ResultShareCount() - 1
+			Select Case modScanWorker.ResultStatus(s)
+				Case sssOk
+					total = total + CommitShare(s, nfoTotal)
+				Case sssUnreachable
+					RaiseEvent ShareError(modScanWorker.ResultRoot(s), _
+						Res(rid_Err_ShareUnreachable, modScanWorker.ResultWin32Error(s)))
+				Case sssFolderFailed
+					RaiseEvent ShareError(modScanWorker.ResultRoot(s), _
+						Res(rid_Err_FolderUnreadable, modScanWorker.ResultFailedFolder(s), modScanWorker.ResultWin32Error(s)))
+				Case sssCancelled
+					cancelled = True
+			End Select
+		Next
+		If m_StateDirty Then SaveState
+
+	Finish:
+		modScanWorker.EndScan
+		m_Busy = False
+		If Not m_PendingShares Is Nothing Then
+			Set pending = m_PendingShares
+			Set m_PendingShares = Nothing
+			SetShares pending
+		End If
+		RaiseEvent PollCompleted(total, nfoTotal, cancelled)
+		Exit Sub
+
+	Failed:
+		RaiseEvent ShareError("", Res(rid_Err_PollFailed, Err.Description))
+		Resume Finish
+	End Sub
+
+	' Compares one completely walked share with the state, updates the state and raises
+	' the events. Returns the number of detected folders; adds the .nfo count to nfoTotal.
+	Private Function CommitShare(ByVal s As Long, ByRef nfoTotal As Long) As Long
+		Dim root As String, prefix As String, baseline As Boolean
+		Dim seen As Object, detected As Object, n As Long, k As Long, key As Variant
+		Dim path As String, stamp As String
+
+		root = modScanWorker.ResultRoot(s)
+		baseline = Not m_Baselined.Exists(root)
+		Set seen = NewDictionary()
+		Set detected = NewDictionary()
+
+		n = modScanWorker.ResultCount(s)
+		nfoTotal = nfoTotal + n
+		For k = 0 To n - 1
+			path = modScanWorker.ResultPath(s, k)
+			stamp = modScanWorker.ResultStamp(s, k)
+			seen.Item(path) = stamp
+			If Not baseline Then
+				If Not m_State.Exists(path) Then
+					MarkDetected detected, modScanWorker.ResultTarget(s, k), True
+				ElseIf m_State.Item(path) <> stamp Then
+					MarkDetected detected, modScanWorker.ResultTarget(s, k), False
+				End If
+			End If
+		Next
+
+		' complete walk: commit to state
+		prefix = root & "\"
+		For Each key In m_State.Keys
+			If IsUnder(CStr(key), prefix) Then
+				If Not seen.Exists(key) Then
+					m_State.Remove key
+					m_StateDirty = True
+				End If
+			End If
+		Next
+		For Each key In seen.Keys
+			If Not m_State.Exists(key) Then
+				m_State.Add key, seen.Item(key)
+				m_StateDirty = True
+			ElseIf m_State.Item(key) <> seen.Item(key) Then
+				m_State.Item(key) = seen.Item(key)
+				m_StateDirty = True
+			End If
+		Next
+
+		If baseline Then
+			m_Baselined.Item(root) = True
+			m_StateDirty = True
+			RaiseEvent BaselineCreated(root, n)
+			Exit Function
+		End If
+
+		For Each key In detected.Keys
+			RaiseEvent FolderDetected(CStr(key), CBool(detected.Item(key)))
+		Next
+		CommitShare = detected.Count
+	End Function
+
+	Private Sub MarkDetected(ByVal detected As Object, ByVal folder As String, ByVal isNew As Boolean)
+		If detected.Exists(folder) Then
+			If isNew Then detected.Item(folder) = True
+		Else
+			detected.Add folder, isNew
+		End If
+	End Sub
+
+	' ---------------------------------------------------------------------------------
+	' State file: UTF-16LE with BOM, CRLF lines:
+	'   # kodi-spot-scan watcher state v1
+	'   B<TAB><share root>                     share has a baseline
+	'   F<TAB><16 hex digits><TAB><nfo path>   last-write time (FILETIME) of an .nfo
+	' Written to <file>.tmp first, then swapped in.
+	' ---------------------------------------------------------------------------------
+
+	Private Sub LoadState()
+		Dim fn As Integer, b() As Byte, s As String, lines() As String, parts() As String
+		Dim i As Long, n As Long
+
+		Set m_State = NewDictionary()
+		Set m_Baselined = NewDictionary()
+		m_StateDirty = False
+		If Len(m_StateFile) = 0 Then Exit Sub
+		If Not modAppConfig.FileExists(m_StateFile) Then Exit Sub
+
+		On Error GoTo Corrupt
+		fn = FreeFile
+		Open m_StateFile For Binary Access Read As #fn
+		n = LOF(fn)
+		If n >= 2 Then
+			ReDim b(0 To n - 1)
+			Get #fn, , b
+		End If
+		Close #fn
+		fn = 0
+		If n < 2 Then Exit Sub
+
+		s = b
+		If Len(s) > 0 Then
+			If (AscW(Left$(s, 1)) And &HFFFF&) = &HFEFF& Then s = Mid$(s, 2)
+		End If
+
+		lines = Split(s, vbCrLf)
+		For i = LBound(lines) To UBound(lines)
+			If Len(lines(i)) > 0 And Left$(lines(i), 1) <> "#" Then
+				parts = Split(lines(i), vbTab)
+				Select Case parts(0)
+					Case "B"
+						If UBound(parts) >= 1 Then m_Baselined.Item(parts(1)) = True
+					Case "F"
+						If UBound(parts) >= 2 Then m_State.Item(parts(2)) = parts(1)
+				End Select
+			End If
+		Next
+		Exit Sub
+
+	Corrupt:
+		' unreadable state: start fresh - every share re-baselines silently on the next poll
+		If fn <> 0 Then Close #fn
+		Set m_State = NewDictionary()
+		Set m_Baselined = NewDictionary()
+		m_StateDirty = True
+	End Sub
+
+	Private Sub SaveState()
+		Dim lines() As String, n As Long, k As Variant, s As String, b() As Byte
+		Dim fn As Integer, tmp As String
+
+		If Len(m_StateFile) = 0 Then Exit Sub
+
+		ReDim lines(0 To m_State.Count + m_Baselined.Count)
+		lines(0) = STATE_HEADER
+		n = 1
+		For Each k In m_Baselined.Keys
+			lines(n) = "B" & vbTab & CStr(k)
+			n = n + 1
+		Next
+		For Each k In m_State.Keys
+			lines(n) = "F" & vbTab & CStr(m_State.Item(k)) & vbTab & CStr(k)
+			n = n + 1
+		Next
+
+		s = ChrW$(&HFEFF&) & Join(lines, vbCrLf) & vbCrLf
+		b = s
+
+		On Error GoTo Failed
+		tmp = m_StateFile & ".tmp"
+		If modAppConfig.FileExists(tmp) Then Kill tmp
+		fn = FreeFile
+		Open tmp For Binary Access Write As #fn
+		Put #fn, , b
+		Close #fn
+		fn = 0
+		If modAppConfig.FileExists(m_StateFile) Then Kill m_StateFile
+		Name tmp As m_StateFile
+		m_StateDirty = False
+		Exit Sub
+
+	Failed:
+		If fn <> 0 Then Close #fn
+		RaiseEvent ShareError("", Res(rid_Err_StateSaveFailed, m_StateFile, Err.Description))
+	End Sub
+
+	' ---------------------------------------------------------------------------------
+	' Helpers
+	' ---------------------------------------------------------------------------------
+
+	Private Function NewDictionary() As Object
+		Dim d As Object
+		Set d = CreateObject("Scripting.Dictionary")
+		d.CompareMode = DICT_TEXT_COMPARE     ' Windows paths are case-insensitive
+		Set NewDictionary = d
+	End Function
+
+	Private Function IsUnder(ByVal path As String, ByVal prefixWithBackslash As String) As Boolean
+		If Len(path) <= Len(prefixWithBackslash) Then Exit Function
+		IsUnder = (StrComp(Left$(path, Len(prefixWithBackslash)), prefixWithBackslash, vbTextCompare) = 0)
+	End Function
+
+	Private Function IsUnderAnyShare(ByVal path As String) As Boolean
+		Dim share As Variant
+		For Each share In m_Shares
+			If IsUnder(path, CStr(share) & "\") Then
+				IsUnderAnyShare = True
+				Exit Function
+			End If
+		Next
+	End Function
+
+	' True if the given list, normalized, is the same set of shares as the current one.
+	Private Function SameShares(ByVal shares As Collection) As Boolean
+		Dim other As New Collection, share As Variant, root As String
+		If Not shares Is Nothing Then
+			For Each share In shares
+				root = modPathTranslator.NormalizeFolder(CStr(share))
+				If Len(root) > 0 And Not ContainsText(other, root) Then other.Add root
+			Next
+		End If
+		If other.Count <> m_Shares.Count Then Exit Function
+		For Each share In other
+			If Not ContainsText(m_Shares, CStr(share)) Then Exit Function
+		Next
+		SameShares = True
+	End Function
+
+	Private Function ContainsText(ByVal c As Collection, ByVal value As String) As Boolean
+		Dim item As Variant
+		For Each item In c
+			If StrComp(CStr(item), value, vbTextCompare) = 0 Then
+				ContainsText = True
+				Exit Function
+			End If
+		Next
+	End Function
 
 End Class

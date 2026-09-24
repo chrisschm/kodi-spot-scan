@@ -1,0 +1,156 @@
+Module modStrings
+
+	' Access to the localized strings in Resources/STRING/Strings.json.
+	'
+	' Windows picks the column (LCID_xxxx) matching the display language, falling back to
+	' LCID_0000 (English). Entry 1 in Strings.json explains the columns for translators.
+	'
+	' Naming convention (shared by Strings.json "name" and this enum, enum with prefix rid_):
+	'   <Area>_<Element>_<Property>, e.g. frmMain_cmdSend_Caption
+	'   Area = form name (frmMain, frmSettings), App, Msg (log/status messages) or Err.
+	' ID ranges: 1-99 meta, 100-199 application, 1000-1999 frmMain, 2000-2999 frmSettings,
+	'            3000-3999 messages, 4000-4999 errors.
+	' The "name" field has no function yet - it is meant for twinBASIC's planned named access
+	' (Resources.Strings.<name>). Until then, keep this enum and Strings.json in sync by hand.
+
+	Public Enum ResId
+		rid_Readme_LanguageColumns               = 1
+
+		rid_App_Title                            = 101
+
+		rid_frmMain_cmdSend_Caption              = 1001
+		rid_frmMain_cmdRemove_Caption            = 1002
+		rid_frmMain_cmdPollNow_Caption           = 1003
+		rid_frmMain_cmdSettings_Caption          = 1004
+		rid_frmMain_lvwDetected_ColFolder        = 1010
+		rid_frmMain_lvwDetected_ColDetected      = 1011
+		rid_frmMain_lvwDetected_ColStatus        = 1012
+		rid_frmMain_Item_New                     = 1020
+		rid_frmMain_Item_Changed                 = 1021
+		rid_frmMain_Item_Sent                    = 1022
+		rid_frmMain_Item_Failed                  = 1023
+		rid_frmMain_sbrStatus_Ready              = 1030
+		rid_frmMain_sbrStatus_Polling            = 1031
+		rid_frmMain_sbrStatus_LastPoll           = 1032
+		rid_frmMain_sbrStatus_NextPoll           = 1033
+		rid_frmMain_sbrStatus_Count              = 1034
+		rid_frmMain_sbrStatus_NoShares           = 1035
+		rid_frmMain_sbrStatus_Never              = 1036
+		rid_frmMain_sbrStatus_PollingProgress    = 1037
+
+		rid_frmSettings_Caption                  = 2000
+		rid_frmSettings_fraShares_Caption        = 2001
+		rid_frmSettings_cmdAddShare_Caption      = 2002
+		rid_frmSettings_cmdRemoveShare_Caption   = 2003
+		rid_frmSettings_fraWatcher_Caption       = 2004
+		rid_frmSettings_lblPollInterval_Caption  = 2005
+		rid_frmSettings_fraKodi_Caption          = 2006
+		rid_frmSettings_lblKodiHost_Caption      = 2007
+		rid_frmSettings_lblKodiPort_Caption      = 2008
+		rid_frmSettings_cmdTestConnection_Caption= 2009
+		rid_frmSettings_cmdOK_Caption            = 2010
+		rid_frmSettings_cmdCancel_Caption        = 2011
+		rid_frmSettings_Err_ShareNotUnc          = 2020
+		rid_frmSettings_Err_ShareDuplicate       = 2021
+		rid_frmSettings_Ask_ShareUnreachable     = 2022
+		rid_frmSettings_Err_PollInterval         = 2023
+		rid_frmSettings_Err_Port                 = 2024
+		rid_frmSettings_Err_Save                 = 2025
+		rid_frmSettings_Test_Running             = 2030
+		rid_frmSettings_Test_Ok                  = 2031
+		rid_frmSettings_Test_Failed              = 2032
+
+		rid_Msg_Started                          = 3001
+		rid_Msg_BaselineCreated                  = 3002
+		rid_Msg_PollCompleted                    = 3003
+		rid_Msg_FolderDetected                   = 3004
+		rid_Msg_ScanSent                         = 3005
+		rid_Msg_ScanFailed                       = 3006
+		rid_Msg_ShareError                       = 3007
+		rid_Msg_SettingsSaved                    = 3008
+		rid_Msg_KodiNotConfigured                = 3009
+		rid_Msg_NothingSelected                  = 3010
+		rid_Msg_PollCancelled                    = 3011
+
+		rid_Err_KodiNoHost                       = 4001
+		rid_Err_KodiNoDirectory                  = 4002
+		rid_Err_KodiUnexpectedAnswer             = 4003
+		rid_Err_KodiAuthRequired                 = 4004
+		rid_Err_KodiHttpStatus                   = 4005
+		rid_Err_KodiReportedError                = 4006
+		rid_Err_KodiErrorWithCode                = 4007
+		rid_Err_KodiUnreachable                  = 4008
+		rid_Err_KodiPortRange                    = 4009
+		rid_Err_ShareUnreachable                 = 4101
+		rid_Err_FolderUnreadable                 = 4102
+		rid_Err_PollFailed                       = 4103
+		rid_Err_StateSaveFailed                  = 4104
+		rid_Err_ScanThreadFailed                 = 4105
+		rid_Err_AppDataMissing                   = 4201
+		rid_Err_ConfigWriteFailed                = 4202
+		rid_Err_NotUncPath                       = 4301
+		rid_Err_NotSmbPath                       = 4302
+		rid_Err_SmbCredentials                   = 4303
+		rid_Err_SmbNoServer                      = 4304
+	End Enum
+
+	' Loads a string and fills in the placeholders %1, %2, ... from args (%% = literal "%").
+	' A missing ID yields "[#<id>]" instead of a runtime error, so a forgotten translation is
+	' visible but never fatal.
+	Public Function Res(ByVal id As ResId, ParamArray args() As Variant) As String
+		Dim s As String, a As Variant
+		On Error GoTo Missing
+		s = LoadResString(id)
+		On Error GoTo 0
+		If UBound(args) >= LBound(args) Then
+			a = args      ' copy: a ParamArray can't be passed on as an array parameter
+			Res = FillPlaceholders(s, a)
+		Else
+			Res = Replace(s, "%%", "%")
+		End If
+		Exit Function
+	Missing:
+		Res = "[#" & CStr(id) & "]"
+	End Function
+
+	' Single left-to-right pass, so placeholder-like text inside an argument (e.g. a folder
+	' name containing "%1") is never substituted again.
+	Private Function FillPlaceholders(ByVal s As String, ByVal args As Variant) As String
+		Dim i As Long, j As Long, n As Long, ch As String, out As String
+		i = 1
+		Do While i <= Len(s)
+			ch = Mid$(s, i, 1)
+			If ch = "%" And i < Len(s) Then
+				If Mid$(s, i + 1, 1) = "%" Then
+					out = out & "%"
+					i = i + 2
+				ElseIf IsDigit(Mid$(s, i + 1, 1)) Then
+					j = i + 1
+					Do While j <= Len(s)
+						If Not IsDigit(Mid$(s, j, 1)) Then Exit Do
+						j = j + 1
+					Loop
+					n = CLng(Mid$(s, i + 1, j - i - 1))
+					If n >= 1 And n - 1 + LBound(args) <= UBound(args) Then
+						out = out & CStr(args(n - 1 + LBound(args)))
+					Else
+						out = out & Mid$(s, i, j - i)
+					End If
+					i = j
+				Else
+					out = out & ch
+					i = i + 1
+				End If
+			Else
+				out = out & ch
+				i = i + 1
+			End If
+		Loop
+		FillPlaceholders = out
+	End Function
+
+	Private Function IsDigit(ByVal ch As String) As Boolean
+		IsDigit = (ch >= "0" And ch <= "9" And Len(ch) = 1)
+	End Function
+
+End Module

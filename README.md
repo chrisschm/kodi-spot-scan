@@ -37,7 +37,7 @@ these choices.
 
 ## Requirements
 
-- Windows
+- Windows 7 or later
 - A Kodi instance reachable over the network with remote control via HTTP enabled (*Settings →
   Services → Control*)
 - tinyMediaManager (v3) preparing `.nfo` files on the watched shares
@@ -71,7 +71,7 @@ Bibliotheks-Scans.
 **Status:** frühe Entwicklungsphase, noch keine Releases. Details zur Architektur stehen bereits
 in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-**Voraussetzungen:** Windows, eine per HTTP fernsteuerbare Kodi-Instanz im Netzwerk, sowie
+**Voraussetzungen:** Windows 7 oder neuer, eine per HTTP fernsteuerbare Kodi-Instanz im Netzwerk, sowie
 tinyMediaManager (v3), das die `.nfo`-Dateien auf den beobachteten Freigaben pflegt.
 
 **Weitere Links:** [Fehler melden](https://github.com/chrisschm/kodi-spot-scan/issues),

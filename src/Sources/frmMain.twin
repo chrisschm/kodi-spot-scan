@@ -3,7 +3,465 @@
 [PredeclaredId]
 Class frmMain
 
-    Sub New()
-    End Sub
-    
+	' Main window: list of detected folders (multi-select) with an explicit "send to Kodi"
+	' action, a short log, and a status bar. Drives clsShareWatcher via tmrPoll (250 ms tick):
+	' every tick pumps the watcher (results of the background walk), every 4th tick counts the
+	' poll countdown down by one second (Timer.Interval is limited to 65535 ms).
+	' Nothing is ever sent to Kodi without an explicit click - see "No automatic or silent
+	' scanning" in docs/ARCHITECTURE.md.
+	'
+	' The status bar is the native Win32 one (msctls_statusbar32 from comctl32, part of
+	' Windows) created via API - deliberately no mscomctl.ocx dependency.
+
+	' ---------------------------------------------------------------------------------
+	' Win32 status bar
+	' ---------------------------------------------------------------------------------
+
+	Private Type RECT
+		Left As Long
+		Top As Long
+		Right As Long
+		Bottom As Long
+	End Type
+
+	Private Declare PtrSafe Sub InitCommonControls Lib "comctl32" ()
+	Private Declare PtrSafe Function CreateWindowExW Lib "user32" ( _
+		ByVal dwExStyle As Long, ByVal lpClassName As LongPtr, ByVal lpWindowName As LongPtr, _
+		ByVal dwStyle As Long, ByVal x As Long, ByVal y As Long, ByVal nWidth As Long, _
+		ByVal nHeight As Long, ByVal hWndParent As LongPtr, ByVal hMenu As LongPtr, _
+		ByVal hInstance As LongPtr, ByVal lpParam As LongPtr) As LongPtr
+	Private Declare PtrSafe Function DestroyWindow Lib "user32" (ByVal hWnd As LongPtr) As Long
+	Private Declare PtrSafe Function SendMessageW Lib "user32" ( _
+		ByVal hWnd As LongPtr, ByVal wMsg As Long, ByVal wParam As LongPtr, ByVal lParam As LongPtr) As LongPtr
+	Private Declare PtrSafe Function GetWindowRect Lib "user32" (ByVal hWnd As LongPtr, ByRef lpRect As RECT) As Long
+	Private Declare PtrSafe Function GetModuleHandleW Lib "kernel32" (ByVal lpModuleName As LongPtr) As LongPtr
+
+	Private Const WS_CHILD As Long = &H40000000
+	Private Const WS_VISIBLE As Long = &H10000000
+	Private Const SBARS_SIZEGRIP As Long = &H100
+	Private Const WM_SIZE As Long = &H5
+	Private Const SB_SETTEXTW As Long = &H40B          ' WM_USER + 11
+	Private Const SB_SETPARTS As Long = &H404          ' WM_USER + 4
+	Private Const STATUSBAR_ID As Long = 1000
+
+	' status bar parts, left to right
+	Private Const PART_STATE As Long = 0
+	Private Const PART_COUNT As Long = 1
+	Private Const PART_LAST As Long = 2
+	Private Const PART_NEXT As Long = 3
+	Private Const PART_COUNT_TOTAL As Long = 4
+
+	' fixed part widths in twips (converted to pixels at runtime, so they scale with DPI)
+	Private Const PART_WIDTH_COUNT As Long = 1500
+	Private Const PART_WIDTH_LAST As Long = 2600
+	Private Const PART_WIDTH_NEXT As Long = 2800
+
+	Private m_hStatusBar As LongPtr
+	Private m_PartText(0 To 3) As String   ' own copy of the part texts, see StatusText
+
+	' ---------------------------------------------------------------------------------
+	' State
+	' ---------------------------------------------------------------------------------
+
+	Private WithEvents m_Watcher As clsShareWatcher
+	Private m_Kodi As clsKodiClient
+
+	Private m_SecondsToPoll As Long
+	Private m_Ticks As Long
+	Private m_PollHadError As Boolean
+	Private m_LogHeight As Single          ' designed height of txtLog, kept on resize
+
+	Private Const LOG_MAX_CHARS As Long = 30000
+	Private Const FIRST_POLL_DELAY_SECONDS As Long = 3
+	Private Const TICK_MS As Long = 250
+	Private Const TICKS_PER_SECOND As Long = 4
+	Private Const SHUTDOWN_WAIT_MS As Long = 3000
+	Private Const ITEM_KEY_PREFIX As String = "K"
+
+	' SubItems indexes (the folder itself is ListItem.Text)
+	Private Const COL_DETECTED As Long = 1
+	Private Const COL_STATUS As Long = 2
+
+	Sub New()
+	End Sub
+
+	' ---------------------------------------------------------------------------------
+	' Form lifecycle
+	' ---------------------------------------------------------------------------------
+
+	Private Sub Form_Load()
+		On Error GoTo ConfigFailed
+		modAppConfig.LoadConfig
+	ContinueLoad:
+		On Error GoTo 0
+		ApplyCaptions
+		CreateStatusBar
+
+		m_LogHeight = txtLog.Height
+		lvwDetected.LabelEdit = 1          ' lvwManual - folder paths are not editable
+		lvwDetected.ColumnHeaders.Clear
+		lvwDetected.ColumnHeaders.Add , , Res(rid_frmMain_lvwDetected_ColFolder), 4000
+		lvwDetected.ColumnHeaders.Add , , Res(rid_frmMain_lvwDetected_ColDetected), 1600
+		lvwDetected.ColumnHeaders.Add , , Res(rid_frmMain_lvwDetected_ColStatus), 1400
+
+		Set m_Kodi = New clsKodiClient
+		Set m_Watcher = New clsShareWatcher
+		On Error Resume Next               ' no state file location: watcher still works, just forgets on exit
+		m_Watcher.StateFilePath = modAppConfig.StateFilePath()
+		On Error GoTo 0
+		ApplySettings
+
+		AppendLog Res(rid_Msg_Started, modAppConfig.Shares.Count)
+		SetStatus PART_STATE, Res(rid_frmMain_sbrStatus_Ready)
+		SetStatus PART_LAST, Res(rid_frmMain_sbrStatus_LastPoll, Res(rid_frmMain_sbrStatus_Never))
+		m_SecondsToPoll = FIRST_POLL_DELAY_SECONDS
+		UpdateCountAndButtons
+
+		tmrPoll.Interval = TICK_MS
+		tmrPoll.Enabled = True
+		Exit Sub
+
+	ConfigFailed:
+		' unreadable config: continue with defaults, but say so
+		MsgBox Err.Description, vbExclamation, Res(rid_App_Title)
+		modAppConfig.SetDefaults
+		Resume ContinueLoad
+	End Sub
+
+	Private Sub Form_QueryUnload(Cancel As Integer, UnloadMode As Integer)
+		' The walk runs in a background thread: ask it to stop and give it a moment. If it is
+		' stuck in an SMB timeout, close anyway - the watcher never frees its buffers while it
+		' runs, and the process end stops the thread.
+		If Not m_Watcher Is Nothing Then
+			If m_Watcher.IsPolling Then
+				m_Watcher.CancelPoll
+				m_Watcher.WaitForPollEnd SHUTDOWN_WAIT_MS
+			End If
+		End If
+	End Sub
+
+	Private Sub Form_Unload(Cancel As Integer)
+		tmrPoll.Enabled = False
+		If m_hStatusBar <> 0 Then
+			DestroyWindow m_hStatusBar
+			m_hStatusBar = 0
+		End If
+		Set m_Watcher = Nothing
+		Set m_Kodi = Nothing
+	End Sub
+
+	Private Sub Form_Resize()
+		Const MARGIN As Single = 120
+		Const GAP As Single = 60
+		Dim sbHeight As Single, avail As Single, logH As Single
+		Dim yLog As Single, yButtons As Single, w As Single
+
+		If Me.WindowState = vbMinimized Then Exit Sub
+		On Error Resume Next            ' tiny window sizes: just don't lay out
+
+		If m_hStatusBar <> 0 Then
+			SendMessageW m_hStatusBar, WM_SIZE, 0, 0      ' lets the status bar dock itself
+			sbHeight = StatusBarHeight()
+			UpdateStatusParts
+		End If
+
+		avail = Me.ScaleHeight - sbHeight
+		w = Me.ScaleWidth - 2 * MARGIN
+		If w < 1000 Or avail < 2000 Then Exit Sub
+
+		logH = m_LogHeight
+		If logH > avail / 3 Then logH = avail / 3
+		yLog = avail - MARGIN - logH
+		yButtons = yLog - GAP - cmdSend.Height
+
+		lvwDetected.Move MARGIN, MARGIN, w, yButtons - GAP - MARGIN
+		cmdSend.Move MARGIN, yButtons
+		cmdRemove.Move cmdSend.Left + cmdSend.Width + GAP, yButtons
+		cmdPollNow.Move cmdRemove.Left + cmdRemove.Width + GAP, yButtons
+		cmdSettings.Move Me.ScaleWidth - MARGIN - cmdSettings.Width, yButtons
+		txtLog.Move MARGIN, yLog, w, logH
+
+		' folder column takes whatever the other two columns leave
+		With lvwDetected.ColumnHeaders
+			If .Count = 3 Then
+				.Item(1).Width = lvwDetected.Width - .Item(2).Width - .Item(3).Width - 400
+			End If
+		End With
+	End Sub
+
+	' ---------------------------------------------------------------------------------
+	' Buttons / timer
+	' ---------------------------------------------------------------------------------
+
+	Private Sub cmdSend_Click()
+		Dim i As Long, item As Object, folder As String, smb As String, sentAny As Boolean
+
+		If Not modAppConfig.IsKodiConfigured() Then
+			MsgBox Res(rid_Msg_KodiNotConfigured), vbInformation, Res(rid_App_Title)
+			Exit Sub
+		End If
+		If SelectedCount() = 0 Then
+			MsgBox Res(rid_Msg_NothingSelected), vbInformation, Res(rid_App_Title)
+			Exit Sub
+		End If
+
+		Me.MousePointer = vbHourglass
+		For i = 1 To lvwDetected.ListItems.Count
+			Set item = lvwDetected.ListItems(i)
+			If item.Selected Then
+				folder = item.Tag
+				If SendOne(folder, smb) Then
+					item.SubItems(COL_STATUS) = Res(rid_frmMain_Item_Sent)
+					AppendLog Res(rid_Msg_ScanSent, folder)
+					modAppConfig.AppendHistory "OK" & vbTab & folder & vbTab & smb
+					sentAny = True
+				Else
+					item.SubItems(COL_STATUS) = Res(rid_frmMain_Item_Failed)
+					AppendLog Res(rid_Msg_ScanFailed, folder, smb)
+					modAppConfig.AppendHistory "FAILED" & vbTab & folder & vbTab & smb
+				End If
+			End If
+		Next
+		Me.MousePointer = vbDefault
+	End Sub
+
+	' Sends one targeted scan. On success detail = the smb:// path sent, on failure the reason.
+	Private Function SendOne(ByVal folder As String, ByRef detail As String) As Boolean
+		Dim smb As String
+		On Error GoTo NotTranslatable
+		smb = modPathTranslator.UncToSmb(folder)
+		On Error GoTo 0
+		If m_Kodi.ScanDirectory(smb) Then
+			detail = smb
+			SendOne = True
+		Else
+			detail = m_Kodi.LastError
+		End If
+		Exit Function
+	NotTranslatable:
+		detail = Err.Description
+	End Function
+
+	Private Sub cmdRemove_Click()
+		Dim i As Long
+		For i = lvwDetected.ListItems.Count To 1 Step -1
+			If lvwDetected.ListItems(i).Selected Then lvwDetected.ListItems.Remove i
+		Next
+		UpdateCountAndButtons
+	End Sub
+
+	Private Sub cmdPollNow_Click()
+		StartPoll
+	End Sub
+
+	Private Sub cmdSettings_Click()
+		Dim saved As Boolean
+		frmSettings.Show vbModal, Me
+		saved = frmSettings.Saved
+		Unload frmSettings
+		If saved Then
+			ApplySettings
+			AppendLog Res(rid_Msg_SettingsSaved, modAppConfig.Shares.Count)
+			m_SecondsToPoll = FIRST_POLL_DELAY_SECONDS
+		End If
+	End Sub
+
+	Private Sub lvwDetected_KeyDown(KeyCode As Integer, Shift As Integer)
+		If KeyCode = vbKeyDelete Then cmdRemove_Click
+	End Sub
+
+	Private Sub tmrPoll_Timer()
+		If m_Watcher Is Nothing Then Exit Sub
+
+		m_Watcher.Pump              ' raises the watcher events once a background walk is done
+		If m_Watcher.IsPolling Then
+			If Not m_PollHadError Then
+				SetStatus PART_STATE, Res(rid_frmMain_sbrStatus_PollingProgress, m_Watcher.ProgressNfoCount)
+			End If
+			Exit Sub
+		End If
+
+		m_Ticks = m_Ticks + 1
+		If m_Ticks < TICKS_PER_SECOND Then Exit Sub
+		m_Ticks = 0
+
+		If m_Watcher.ShareCount = 0 Then
+			SetStatus PART_STATE, Res(rid_frmMain_sbrStatus_NoShares)
+			SetStatus PART_NEXT, ""
+			Exit Sub
+		End If
+
+		m_SecondsToPoll = m_SecondsToPoll - 1
+		If m_SecondsToPoll <= 0 Then
+			StartPoll
+		Else
+			SetStatus PART_NEXT, Res(rid_frmMain_sbrStatus_NextPoll, m_SecondsToPoll)
+		End If
+	End Sub
+
+	Private Sub StartPoll()
+		If m_Watcher.IsPolling Or m_Watcher.ShareCount = 0 Then Exit Sub
+		cmdPollNow.Enabled = False
+		m_PollHadError = False
+		SetStatus PART_STATE, Res(rid_frmMain_sbrStatus_Polling)
+		SetStatus PART_NEXT, ""
+		m_Watcher.Poll         ' returns at once; results arrive via Pump in tmrPoll_Timer
+	End Sub
+
+	' ---------------------------------------------------------------------------------
+	' Watcher events
+	' ---------------------------------------------------------------------------------
+
+	Private Sub m_Watcher_FolderDetected(ByVal FolderPath As String, ByVal IsNew As Boolean)
+		Dim item As Object, statusText As String
+
+		If IsNew Then
+			statusText = Res(rid_frmMain_Item_New)
+		Else
+			statusText = Res(rid_frmMain_Item_Changed)
+		End If
+
+		Set item = FindItem(FolderPath)
+		If item Is Nothing Then
+			Set item = lvwDetected.ListItems.Add(, ITEM_KEY_PREFIX & LCase$(FolderPath), FolderPath)
+			item.Tag = FolderPath
+			item.SubItems(COL_DETECTED) = ""
+			item.SubItems(COL_STATUS) = ""
+		End If
+		item.SubItems(COL_DETECTED) = Format$(Now, "ddddd hh:nn")
+		item.SubItems(COL_STATUS) = statusText
+
+		AppendLog Res(rid_Msg_FolderDetected, FolderPath, statusText)
+		UpdateCountAndButtons
+	End Sub
+
+	Private Sub m_Watcher_BaselineCreated(ByVal SharePath As String, ByVal NfoFiles As Long)
+		AppendLog Res(rid_Msg_BaselineCreated, SharePath, NfoFiles)
+	End Sub
+
+	Private Sub m_Watcher_ShareError(ByVal SharePath As String, ByVal Message As String)
+		If Len(SharePath) > 0 Then
+			AppendLog Res(rid_Msg_ShareError, SharePath, Message)
+		Else
+			AppendLog Message
+		End If
+		m_PollHadError = True
+		SetStatus PART_STATE, Message
+	End Sub
+
+	Private Sub m_Watcher_PollCompleted(ByVal FoldersDetected As Long, ByVal NfoFilesSeen As Long, _
+			ByVal Cancelled As Boolean)
+		If Cancelled Then
+			' typically: settings saved while a poll was running - check again soon
+			AppendLog Res(rid_Msg_PollCancelled)
+			SetStatus PART_STATE, Res(rid_frmMain_sbrStatus_Ready)
+			m_SecondsToPoll = FIRST_POLL_DELAY_SECONDS
+			cmdPollNow.Enabled = True
+			Exit Sub
+		End If
+
+		If FoldersDetected > 0 Then AppendLog Res(rid_Msg_PollCompleted, FoldersDetected, NfoFilesSeen)
+		SetStatus PART_LAST, Res(rid_frmMain_sbrStatus_LastPoll, Format$(Now, "hh:nn:ss"))
+		If Not m_PollHadError Then SetStatus PART_STATE, Res(rid_frmMain_sbrStatus_Ready)
+		m_SecondsToPoll = modAppConfig.PollIntervalSeconds
+		cmdPollNow.Enabled = True
+	End Sub
+
+	' ---------------------------------------------------------------------------------
+	' Helpers
+	' ---------------------------------------------------------------------------------
+
+	Private Sub ApplyCaptions()
+		Me.Caption = Res(rid_App_Title)
+		cmdSend.Caption = Res(rid_frmMain_cmdSend_Caption)
+		cmdRemove.Caption = Res(rid_frmMain_cmdRemove_Caption)
+		cmdPollNow.Caption = Res(rid_frmMain_cmdPollNow_Caption)
+		cmdSettings.Caption = Res(rid_frmMain_cmdSettings_Caption)
+	End Sub
+
+	' Pushes the current modAppConfig values into the watcher and the Kodi client.
+	Private Sub ApplySettings()
+		m_Kodi.Host = modAppConfig.KodiHost
+		m_Kodi.Port = modAppConfig.KodiPort
+		m_Kodi.TimeoutSeconds = modAppConfig.KodiTimeoutSeconds
+		m_Watcher.SetShares modAppConfig.Shares
+		If m_Watcher.ShareCount = 0 Then
+			SetStatus PART_STATE, Res(rid_frmMain_sbrStatus_NoShares)
+		Else
+			SetStatus PART_STATE, Res(rid_frmMain_sbrStatus_Ready)
+		End If
+	End Sub
+
+	Private Function FindItem(ByVal folder As String) As Object
+		On Error Resume Next
+		Set FindItem = lvwDetected.ListItems(ITEM_KEY_PREFIX & LCase$(folder))
+		If Err.Number <> 0 Then Set FindItem = Nothing
+	End Function
+
+	Private Function SelectedCount() As Long
+		Dim i As Long
+		For i = 1 To lvwDetected.ListItems.Count
+			If lvwDetected.ListItems(i).Selected Then SelectedCount = SelectedCount + 1
+		Next
+	End Function
+
+	Private Sub UpdateCountAndButtons()
+		Dim n As Long
+		n = lvwDetected.ListItems.Count
+		cmdSend.Enabled = (n > 0)
+		cmdRemove.Enabled = (n > 0)
+		SetStatus PART_COUNT, Res(rid_frmMain_sbrStatus_Count, n)
+	End Sub
+
+	Private Sub AppendLog(ByVal text As String)
+		Dim s As String
+		s = txtLog.Text
+		If Len(s) > LOG_MAX_CHARS Then
+			s = Mid$(s, InStr(Len(s) - LOG_MAX_CHARS \ 2, s, vbCrLf) + 2)
+		End If
+		If Len(s) > 0 Then s = s & vbCrLf
+		txtLog.Text = s & Format$(Now, "hh:nn:ss") & "  " & text
+		txtLog.SelStart = Len(txtLog.Text)
+	End Sub
+
+	' --- status bar ---
+
+	Private Sub CreateStatusBar()
+		InitCommonControls
+		m_hStatusBar = CreateWindowExW(0, StrPtr("msctls_statusbar32"), 0, _
+			WS_CHILD Or WS_VISIBLE Or SBARS_SIZEGRIP, 0, 0, 0, 0, _
+			Me.hWnd, STATUSBAR_ID, GetModuleHandleW(0), 0)
+		If m_hStatusBar <> 0 Then UpdateStatusParts
+	End Sub
+
+	Private Sub UpdateStatusParts()
+		Dim edges(0 To PART_COUNT_TOTAL - 1) As Long, clientPx As Long
+		If m_hStatusBar = 0 Then Exit Sub
+		clientPx = CLng(Me.ScaleX(Me.ScaleWidth, Me.ScaleMode, vbPixels))
+		edges(PART_NEXT) = -1
+		edges(PART_LAST) = clientPx - CLng(Me.ScaleX(PART_WIDTH_NEXT, vbTwips, vbPixels))
+		edges(PART_COUNT) = edges(PART_LAST) - CLng(Me.ScaleX(PART_WIDTH_LAST, vbTwips, vbPixels))
+		edges(PART_STATE) = edges(PART_COUNT) - CLng(Me.ScaleX(PART_WIDTH_COUNT, vbTwips, vbPixels))
+		If edges(PART_STATE) < 50 Then edges(PART_STATE) = 50
+		If edges(PART_COUNT) < edges(PART_STATE) Then edges(PART_COUNT) = edges(PART_STATE)
+		If edges(PART_LAST) < edges(PART_COUNT) Then edges(PART_LAST) = edges(PART_COUNT)
+		SendMessageW m_hStatusBar, SB_SETPARTS, PART_COUNT_TOTAL, VarPtr(edges(0))
+	End Sub
+
+	Private Function StatusBarHeight() As Single
+		Dim r As RECT
+		If m_hStatusBar = 0 Then Exit Function
+		GetWindowRect m_hStatusBar, r
+		StatusBarHeight = Me.ScaleY(r.Bottom - r.Top, vbPixels, Me.ScaleMode)
+	End Function
+
+	Private Sub SetStatus(ByVal part As Long, ByVal text As String)
+		m_PartText(part) = text
+		If m_hStatusBar <> 0 Then SendMessageW m_hStatusBar, SB_SETTEXTW, part, StrPtr(text)
+	End Sub
+
+	Private Function StatusText(ByVal part As Long) As String
+		StatusText = m_PartText(part)
+	End Function
+
 End Class

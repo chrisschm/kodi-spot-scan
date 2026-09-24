@@ -1,0 +1,440 @@
+[
+    {
+        "id": 1,
+        "name": "Readme_LanguageColumns",
+        "LCID_0000": "Translation table for kodi-spot-scan. JSON has no comments, so this entry explains the columns - each in its own language. LCID_0000 = English: the neutral fallback, used for every Windows display language that has no column of its own. LCID_0407 = German (Germany). To add a language, add an LCID_xxxx column (Windows LCID in hex) to every entry. The primary-language-only form (e.g. LCID_0007) is NOT picked up by Windows - always use the full LCID. IDs and names must match the ResId enum in modStrings.twin; placeholders %1, %2, ... are filled in by modStrings.Res, %% is a literal percent sign.",
+        "LCID_0407": "Übersetzungstabelle für kodi-spot-scan. JSON kennt keine Kommentare, deshalb erklärt dieser Eintrag die Spalten - jede in ihrer eigenen Sprache. LCID_0407 = Deutsch (Deutschland). LCID_0000 = Englisch: der neutrale Rückfall für jede Windows-Anzeigesprache ohne eigene Spalte. Für eine weitere Sprache jedem Eintrag eine Spalte LCID_xxxx (Windows-LCID in Hex) hinzufügen. Die reine Hauptsprache (z. B. LCID_0007) wird von Windows NICHT gefunden - immer die vollständige LCID verwenden. IDs und Namen müssen zum Enum ResId in modStrings.twin passen; Platzhalter %1, %2, ... setzt modStrings.Res ein, %% ist ein wörtliches Prozentzeichen."
+    },
+    {
+        "id": 101,
+        "name": "App_Title",
+        "LCID_0000": "Kodi Spot Scan",
+        "LCID_0407": "Kodi Spot Scan"
+    },
+    {
+        "id": 1001,
+        "name": "frmMain_cmdSend_Caption",
+        "LCID_0000": "Send to Kodi",
+        "LCID_0407": "An Kodi senden"
+    },
+    {
+        "id": 1002,
+        "name": "frmMain_cmdRemove_Caption",
+        "LCID_0000": "Remove from list",
+        "LCID_0407": "Aus Liste entfernen"
+    },
+    {
+        "id": 1003,
+        "name": "frmMain_cmdPollNow_Caption",
+        "LCID_0000": "Check now",
+        "LCID_0407": "Jetzt prüfen"
+    },
+    {
+        "id": 1004,
+        "name": "frmMain_cmdSettings_Caption",
+        "LCID_0000": "Settings...",
+        "LCID_0407": "Einstellungen..."
+    },
+    {
+        "id": 1010,
+        "name": "frmMain_lvwDetected_ColFolder",
+        "LCID_0000": "Folder",
+        "LCID_0407": "Ordner"
+    },
+    {
+        "id": 1011,
+        "name": "frmMain_lvwDetected_ColDetected",
+        "LCID_0000": "Detected",
+        "LCID_0407": "Erkannt"
+    },
+    {
+        "id": 1012,
+        "name": "frmMain_lvwDetected_ColStatus",
+        "LCID_0000": "Status",
+        "LCID_0407": "Status"
+    },
+    {
+        "id": 1020,
+        "name": "frmMain_Item_New",
+        "LCID_0000": "new",
+        "LCID_0407": "neu"
+    },
+    {
+        "id": 1021,
+        "name": "frmMain_Item_Changed",
+        "LCID_0000": "changed",
+        "LCID_0407": "geändert"
+    },
+    {
+        "id": 1022,
+        "name": "frmMain_Item_Sent",
+        "LCID_0000": "sent",
+        "LCID_0407": "gesendet"
+    },
+    {
+        "id": 1023,
+        "name": "frmMain_Item_Failed",
+        "LCID_0000": "failed",
+        "LCID_0407": "fehlgeschlagen"
+    },
+    {
+        "id": 1030,
+        "name": "frmMain_sbrStatus_Ready",
+        "LCID_0000": "Ready",
+        "LCID_0407": "Bereit"
+    },
+    {
+        "id": 1031,
+        "name": "frmMain_sbrStatus_Polling",
+        "LCID_0000": "Checking shares...",
+        "LCID_0407": "Prüfe Freigaben..."
+    },
+    {
+        "id": 1032,
+        "name": "frmMain_sbrStatus_LastPoll",
+        "LCID_0000": "Last check: %1",
+        "LCID_0407": "Letzte Prüfung: %1"
+    },
+    {
+        "id": 1033,
+        "name": "frmMain_sbrStatus_NextPoll",
+        "LCID_0000": "Next check in %1 s",
+        "LCID_0407": "Nächste Prüfung in %1 s"
+    },
+    {
+        "id": 1034,
+        "name": "frmMain_sbrStatus_Count",
+        "LCID_0000": "%1 in list",
+        "LCID_0407": "%1 in Liste"
+    },
+    {
+        "id": 1035,
+        "name": "frmMain_sbrStatus_NoShares",
+        "LCID_0000": "No shares configured - see Settings",
+        "LCID_0407": "Keine Freigaben eingerichtet - siehe Einstellungen"
+    },
+    {
+        "id": 1036,
+        "name": "frmMain_sbrStatus_Never",
+        "LCID_0000": "never",
+        "LCID_0407": "noch nie"
+    },
+    {
+        "id": 1037,
+        "name": "frmMain_sbrStatus_PollingProgress",
+        "LCID_0000": "Checking shares... %1 .nfo so far",
+        "LCID_0407": "Prüfe Freigaben... bisher %1 .nfo"
+    },
+    {
+        "id": 2000,
+        "name": "frmSettings_Caption",
+        "LCID_0000": "Settings",
+        "LCID_0407": "Einstellungen"
+    },
+    {
+        "id": 2001,
+        "name": "frmSettings_fraShares_Caption",
+        "LCID_0000": "Watched shares",
+        "LCID_0407": "Beobachtete Freigaben"
+    },
+    {
+        "id": 2002,
+        "name": "frmSettings_cmdAddShare_Caption",
+        "LCID_0000": "Add",
+        "LCID_0407": "Hinzufügen"
+    },
+    {
+        "id": 2003,
+        "name": "frmSettings_cmdRemoveShare_Caption",
+        "LCID_0000": "Remove",
+        "LCID_0407": "Entfernen"
+    },
+    {
+        "id": 2004,
+        "name": "frmSettings_fraWatcher_Caption",
+        "LCID_0000": "Checking",
+        "LCID_0407": "Prüfung"
+    },
+    {
+        "id": 2005,
+        "name": "frmSettings_lblPollInterval_Caption",
+        "LCID_0000": "Interval (seconds):",
+        "LCID_0407": "Intervall (Sekunden):"
+    },
+    {
+        "id": 2006,
+        "name": "frmSettings_fraKodi_Caption",
+        "LCID_0000": "Kodi target",
+        "LCID_0407": "Kodi-Ziel"
+    },
+    {
+        "id": 2007,
+        "name": "frmSettings_lblKodiHost_Caption",
+        "LCID_0000": "Host / IP address:",
+        "LCID_0407": "Host / IP-Adresse:"
+    },
+    {
+        "id": 2008,
+        "name": "frmSettings_lblKodiPort_Caption",
+        "LCID_0000": "Port:",
+        "LCID_0407": "Port:"
+    },
+    {
+        "id": 2009,
+        "name": "frmSettings_cmdTestConnection_Caption",
+        "LCID_0000": "Test connection",
+        "LCID_0407": "Verbindung testen"
+    },
+    {
+        "id": 2010,
+        "name": "frmSettings_cmdOK_Caption",
+        "LCID_0000": "OK",
+        "LCID_0407": "OK"
+    },
+    {
+        "id": 2011,
+        "name": "frmSettings_cmdCancel_Caption",
+        "LCID_0000": "Cancel",
+        "LCID_0407": "Abbrechen"
+    },
+    {
+        "id": 2020,
+        "name": "frmSettings_Err_ShareNotUnc",
+        "LCID_0000": "Please enter a UNC path such as \\\\server\\share\\folder.",
+        "LCID_0407": "Bitte einen UNC-Pfad wie \\\\server\\freigabe\\ordner eingeben."
+    },
+    {
+        "id": 2021,
+        "name": "frmSettings_Err_ShareDuplicate",
+        "LCID_0000": "This share is already in the list.",
+        "LCID_0407": "Diese Freigabe steht bereits in der Liste."
+    },
+    {
+        "id": 2022,
+        "name": "frmSettings_Ask_ShareUnreachable",
+        "LCID_0000": "%1 is currently not reachable. Add it anyway?",
+        "LCID_0407": "%1 ist zurzeit nicht erreichbar. Trotzdem hinzufügen?"
+    },
+    {
+        "id": 2023,
+        "name": "frmSettings_Err_PollInterval",
+        "LCID_0000": "Please enter an interval between %1 and %2 seconds.",
+        "LCID_0407": "Bitte ein Intervall zwischen %1 und %2 Sekunden eingeben."
+    },
+    {
+        "id": 2024,
+        "name": "frmSettings_Err_Port",
+        "LCID_0000": "Please enter a port between 1 and 65535.",
+        "LCID_0407": "Bitte einen Port zwischen 1 und 65535 eingeben."
+    },
+    {
+        "id": 2025,
+        "name": "frmSettings_Err_Save",
+        "LCID_0000": "The settings could not be saved:\n%1",
+        "LCID_0407": "Die Einstellungen konnten nicht gespeichert werden:\n%1"
+    },
+    {
+        "id": 2030,
+        "name": "frmSettings_Test_Running",
+        "LCID_0000": "Testing...",
+        "LCID_0407": "Teste..."
+    },
+    {
+        "id": 2031,
+        "name": "frmSettings_Test_Ok",
+        "LCID_0000": "Connection OK.",
+        "LCID_0407": "Verbindung OK."
+    },
+    {
+        "id": 2032,
+        "name": "frmSettings_Test_Failed",
+        "LCID_0000": "Failed: %1",
+        "LCID_0407": "Fehlgeschlagen: %1"
+    },
+    {
+        "id": 3001,
+        "name": "Msg_Started",
+        "LCID_0000": "Started, watching %1 share(s).",
+        "LCID_0407": "Gestartet, %1 Freigabe(n) werden beobachtet."
+    },
+    {
+        "id": 3002,
+        "name": "Msg_BaselineCreated",
+        "LCID_0000": "First check of %1: %2 .nfo file(s) recorded, nothing flagged.",
+        "LCID_0407": "Erste Prüfung von %1: %2 .nfo-Datei(en) erfasst, nichts markiert."
+    },
+    {
+        "id": 3003,
+        "name": "Msg_PollCompleted",
+        "LCID_0000": "Check finished: %1 folder(s) detected, %2 .nfo file(s) checked.",
+        "LCID_0407": "Prüfung beendet: %1 Ordner erkannt, %2 .nfo-Datei(en) geprüft."
+    },
+    {
+        "id": 3004,
+        "name": "Msg_FolderDetected",
+        "LCID_0000": "Detected (%2): %1",
+        "LCID_0407": "Erkannt (%2): %1"
+    },
+    {
+        "id": 3005,
+        "name": "Msg_ScanSent",
+        "LCID_0000": "Scan requested: %1",
+        "LCID_0407": "Scan angefordert: %1"
+    },
+    {
+        "id": 3006,
+        "name": "Msg_ScanFailed",
+        "LCID_0000": "Scan failed for %1: %2",
+        "LCID_0407": "Scan fehlgeschlagen für %1: %2"
+    },
+    {
+        "id": 3007,
+        "name": "Msg_ShareError",
+        "LCID_0000": "%1: %2",
+        "LCID_0407": "%1: %2"
+    },
+    {
+        "id": 3008,
+        "name": "Msg_SettingsSaved",
+        "LCID_0000": "Settings saved, watching %1 share(s).",
+        "LCID_0407": "Einstellungen gespeichert, %1 Freigabe(n) werden beobachtet."
+    },
+    {
+        "id": 3009,
+        "name": "Msg_KodiNotConfigured",
+        "LCID_0000": "No Kodi target configured - please open the settings.",
+        "LCID_0407": "Kein Kodi-Ziel eingerichtet - bitte die Einstellungen öffnen."
+    },
+    {
+        "id": 3010,
+        "name": "Msg_NothingSelected",
+        "LCID_0000": "Please select at least one folder in the list.",
+        "LCID_0407": "Bitte mindestens einen Ordner in der Liste auswählen."
+    },
+    {
+        "id": 3011,
+        "name": "Msg_PollCancelled",
+        "LCID_0000": "Check cancelled - partial results discarded, next check shortly.",
+        "LCID_0407": "Prüfung abgebrochen - Teilergebnisse verworfen, erneute Prüfung in Kürze."
+    },
+    {
+        "id": 4001,
+        "name": "Err_KodiNoHost",
+        "LCID_0000": "No Kodi host configured.",
+        "LCID_0407": "Kein Kodi-Host eingerichtet."
+    },
+    {
+        "id": 4002,
+        "name": "Err_KodiNoDirectory",
+        "LCID_0000": "No directory given.",
+        "LCID_0407": "Kein Verzeichnis angegeben."
+    },
+    {
+        "id": 4003,
+        "name": "Err_KodiUnexpectedAnswer",
+        "LCID_0000": "Unexpected answer from Kodi: %1",
+        "LCID_0407": "Unerwartete Antwort von Kodi: %1"
+    },
+    {
+        "id": 4004,
+        "name": "Err_KodiAuthRequired",
+        "LCID_0000": "Kodi requires authentication (HTTP 401). kodi-spot-scan does not send credentials - see SECURITY.md.",
+        "LCID_0407": "Kodi verlangt eine Anmeldung (HTTP 401). kodi-spot-scan sendet keine Zugangsdaten - siehe SECURITY.md."
+    },
+    {
+        "id": 4005,
+        "name": "Err_KodiHttpStatus",
+        "LCID_0000": "Kodi answered HTTP %1.",
+        "LCID_0407": "Kodi antwortete mit HTTP %1."
+    },
+    {
+        "id": 4006,
+        "name": "Err_KodiReportedError",
+        "LCID_0000": "Kodi reported an error: %1",
+        "LCID_0407": "Kodi meldete einen Fehler: %1"
+    },
+    {
+        "id": 4007,
+        "name": "Err_KodiErrorWithCode",
+        "LCID_0000": "%1 (code %2)",
+        "LCID_0407": "%1 (Code %2)"
+    },
+    {
+        "id": 4008,
+        "name": "Err_KodiUnreachable",
+        "LCID_0000": "Could not reach Kodi at %1: %2",
+        "LCID_0407": "Kodi unter %1 nicht erreichbar: %2"
+    },
+    {
+        "id": 4009,
+        "name": "Err_KodiPortRange",
+        "LCID_0000": "Port must be between 1 and 65535.",
+        "LCID_0407": "Der Port muss zwischen 1 und 65535 liegen."
+    },
+    {
+        "id": 4101,
+        "name": "Err_ShareUnreachable",
+        "LCID_0000": "Share not reachable (Win32 error %1).",
+        "LCID_0407": "Freigabe nicht erreichbar (Win32-Fehler %1)."
+    },
+    {
+        "id": 4102,
+        "name": "Err_FolderUnreadable",
+        "LCID_0000": "Could not read folder %1 (Win32 error %2) - check of this share skipped, state kept.",
+        "LCID_0407": "Ordner %1 nicht lesbar (Win32-Fehler %2) - Prüfung dieser Freigabe übersprungen, Stand bleibt erhalten."
+    },
+    {
+        "id": 4103,
+        "name": "Err_PollFailed",
+        "LCID_0000": "Check failed: %1",
+        "LCID_0407": "Prüfung fehlgeschlagen: %1"
+    },
+    {
+        "id": 4104,
+        "name": "Err_StateSaveFailed",
+        "LCID_0000": "Could not save watcher state to %1: %2",
+        "LCID_0407": "Watcher-Stand konnte nicht nach %1 gespeichert werden: %2"
+    },
+    {
+        "id": 4105,
+        "name": "Err_ScanThreadFailed",
+        "LCID_0000": "Could not start the background check of the shares.",
+        "LCID_0407": "Die Prüfung der Freigaben im Hintergrund konnte nicht gestartet werden."
+    },
+    {
+        "id": 4201,
+        "name": "Err_AppDataMissing",
+        "LCID_0000": "The APPDATA environment variable is not set.",
+        "LCID_0407": "Die Umgebungsvariable APPDATA ist nicht gesetzt."
+    },
+    {
+        "id": 4202,
+        "name": "Err_ConfigWriteFailed",
+        "LCID_0000": "Could not write setting [%1] %2 to %3 (Win32 error %4).",
+        "LCID_0407": "Einstellung [%1] %2 konnte nicht nach %3 geschrieben werden (Win32-Fehler %4)."
+    },
+    {
+        "id": 4301,
+        "name": "Err_NotUncPath",
+        "LCID_0000": "Not a UNC path: %1",
+        "LCID_0407": "Kein UNC-Pfad: %1"
+    },
+    {
+        "id": 4302,
+        "name": "Err_NotSmbPath",
+        "LCID_0000": "Not an smb:// path: %1",
+        "LCID_0407": "Kein smb://-Pfad: %1"
+    },
+    {
+        "id": 4303,
+        "name": "Err_SmbCredentials",
+        "LCID_0000": "smb:// paths with embedded credentials are not supported: %1",
+        "LCID_0407": "smb://-Pfade mit eingebetteten Zugangsdaten werden nicht unterstützt: %1"
+    },
+    {
+        "id": 4304,
+        "name": "Err_SmbNoServer",
+        "LCID_0000": "Missing server name: %1",
+        "LCID_0407": "Servername fehlt: %1"
+    }
+]

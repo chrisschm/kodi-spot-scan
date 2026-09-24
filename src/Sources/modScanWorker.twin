@@ -1,0 +1,417 @@
+Module modScanWorker
+
+	' Background walk of the watched shares for clsShareWatcher, in its own thread
+	' (CreateThread + AddressOf - hence a standard module). See "Background scan thread" in
+	' docs/ARCHITECTURE.md and ops issue #7.
+	'
+	' Verified beforehand with a stand-alone twinBASIC test (24.09.2026): two such workers in
+	' parallel plus string work on the UI thread, identical results, no crash.
+	'
+	' Rules for code running in the worker thread (ScanThreadProc and everything it calls):
+	' - Win32 API calls, plain strings, and the module-level arrays below only.
+	' - No COM objects (no Scripting.Dictionary), no forms/controls, no events, no Res(),
+	'   no code path that can raise a runtime error.
+	' Hand-over: the UI thread fills the inputs and starts the thread; the worker writes the
+	' results and finally sets m_Finished (InterlockedExchange). The UI thread reads results
+	' only after IsFinished() returned True, then calls EndScan. The flags are read with
+	' InterlockedCompareExchange so neither side can keep a stale copy.
+	' InterlockedExchange/InterlockedCompareExchange are kernel32 exports on x86 only - fine,
+	' builds are 32-bit (see "Windows version compatibility" in ARCHITECTURE.md).
+	'
+	' Per share the worker delivers a flat list: nfo path, last-write stamp and the folder
+	' Kodi should scan for it (the TV show folder below a tvshow.nfo, otherwise the folder of
+	' the .nfo). Comparing that against the persisted state stays on the UI thread.
+	'
+	' Err.LastDllError is read in the worker right after the API call. Should the runtime's
+	' Err object be shared between threads, a UI-thread API call in between could replace
+	' the code; the effect is conservative (a share is reported as failed and retried on the
+	' next poll, its state kept), never a false "deleted" or "new".
+
+	Public Enum ScanShareStatus
+		sssOk = 0
+		sssUnreachable = 1
+		sssFolderFailed = 2
+		sssCancelled = 3
+	End Enum
+
+	Private Type FILETIME
+		dwLowDateTime As Long
+		dwHighDateTime As Long
+	End Type
+
+	' cFileName/cAlternateFileName as Integer arrays (not String) so the UDT is passed to
+	' the W API as-is, without any ANSI conversion.
+	Private Type WIN32_FIND_DATAW
+		dwFileAttributes As Long
+		ftCreationTime As FILETIME
+		ftLastAccessTime As FILETIME
+		ftLastWriteTime As FILETIME
+		nFileSizeHigh As Long
+		nFileSizeLow As Long
+		dwReserved0 As Long
+		dwReserved1 As Long
+		cFileName(0 To 259) As Integer
+		cAlternateFileName(0 To 13) As Integer
+	End Type
+
+	Private Type ShareResult
+		Root As String
+		Status As Long              ' ScanShareStatus
+		Win32Error As Long
+		FailedFolder As String
+		Count As Long
+		Paths() As String
+		Stamps() As String
+		Targets() As String
+	End Type
+
+	Private Declare PtrSafe Function FindFirstFileExW Lib "kernel32" ( _
+		ByVal lpFileName As LongPtr, ByVal fInfoLevelId As Long, ByRef lpFindFileData As WIN32_FIND_DATAW, _
+		ByVal fSearchOp As Long, ByVal lpSearchFilter As LongPtr, ByVal dwAdditionalFlags As Long) As LongPtr
+	Private Declare PtrSafe Function FindNextFileW Lib "kernel32" ( _
+		ByVal hFindFile As LongPtr, ByRef lpFindFileData As WIN32_FIND_DATAW) As Long
+	Private Declare PtrSafe Function FindClose Lib "kernel32" (ByVal hFindFile As LongPtr) As Long
+	Private Declare PtrSafe Function CreateThread Lib "kernel32" ( _
+		ByVal lpThreadAttributes As LongPtr, ByVal dwStackSize As LongPtr, ByVal lpStartAddress As LongPtr, _
+		ByVal lpParameter As LongPtr, ByVal dwCreationFlags As Long, ByRef lpThreadId As Long) As LongPtr
+	Private Declare PtrSafe Function WaitForSingleObject Lib "kernel32" ( _
+		ByVal hHandle As LongPtr, ByVal dwMilliseconds As Long) As Long
+	Private Declare PtrSafe Function CloseHandle Lib "kernel32" (ByVal hObject As LongPtr) As Long
+	Private Declare PtrSafe Function InterlockedExchange Lib "kernel32" ( _
+		ByRef Target As Long, ByVal Value As Long) As Long
+	Private Declare PtrSafe Function InterlockedCompareExchange Lib "kernel32" ( _
+		ByRef Destination As Long, ByVal Exchange As Long, ByVal Comperand As Long) As Long
+
+	Private Const INVALID_HANDLE_VALUE As Long = -1
+	Private Const WAIT_OBJECT_0 As Long = 0
+	Private Const FIND_EX_INFO_STANDARD As Long = 0
+	Private Const FIND_EX_INFO_BASIC As Long = 1            ' skip 8.3 names - faster (Win7+)
+	Private Const FIND_EX_SEARCH_NAME_MATCH As Long = 0
+	Private Const FIND_FIRST_EX_LARGE_FETCH As Long = 2     ' bigger buffer - fewer SMB round trips (Win7+)
+	Private Const FILE_ATTRIBUTE_HIDDEN As Long = &H2
+	Private Const FILE_ATTRIBUTE_SYSTEM As Long = &H4
+	Private Const FILE_ATTRIBUTE_DIRECTORY As Long = &H10
+	Private Const FILE_ATTRIBUTE_REPARSE_POINT As Long = &H400
+	Private Const ERROR_FILE_NOT_FOUND As Long = 2
+	Private Const ERROR_PATH_NOT_FOUND As Long = 3
+	Private Const ERROR_NO_MORE_FILES As Long = 18
+	Private Const ERROR_INVALID_PARAMETER As Long = 87
+
+	Private Const TVSHOW_NFO As String = "tvshow.nfo"
+	Private Const CANCEL_CHECK_EVERY_N_ENTRIES As Long = 256
+
+	Private m_Results() As ShareResult
+	Private m_ShareCount As Long
+	Private m_hThread As LongPtr
+
+	' shared flags - only accessed via Interlocked* calls
+	Private m_Running As Long           ' 1 from StartScan until EndScan (UI thread)
+	Private m_Finished As Long          ' 1 once the worker is done (worker thread)
+	Private m_Cancel As Long            ' 1 = please stop (UI thread), polled by the worker
+	Private m_Progress As Long          ' .nfo files found so far (worker thread)
+
+	' FindExInfoBasic / FIND_FIRST_EX_LARGE_FETCH need Windows 7+; XP/Vista reject them with
+	' ERROR_INVALID_PARAMETER, after which FindFirst uses the standard call from then on.
+	' Only ever written by the worker thread.
+	Private m_NoFastFind As Boolean
+
+	' ---------------------------------------------------------------------------------
+	' UI-thread API
+	' ---------------------------------------------------------------------------------
+
+	' Starts walking the given roots (Collection of normalized paths, no trailing
+	' backslash). False if a scan is still active or the thread couldn't be created.
+	Public Function StartScan(ByVal roots As Collection) As Boolean
+		Dim r As Variant, i As Long, tid As Long
+
+		If IsRunning() Then Exit Function
+		If roots Is Nothing Then Exit Function
+		If roots.Count = 0 Then Exit Function
+
+		m_ShareCount = roots.Count
+		ReDim m_Results(0 To m_ShareCount - 1)
+		For Each r In roots
+			m_Results(i).Root = CStr(r)
+			i = i + 1
+		Next
+
+		InterlockedExchange m_Cancel, 0
+		InterlockedExchange m_Progress, 0
+		InterlockedExchange m_Finished, 0
+		InterlockedExchange m_Running, 1
+
+		m_hThread = CreateThread(0, 0, AddressOf ScanThreadProc, 0, 0, tid)
+		If m_hThread = 0 Then
+			InterlockedExchange m_Running, 0
+			Exit Function
+		End If
+		StartScan = True
+	End Function
+
+	' True from StartScan until EndScan.
+	Public Function IsRunning() As Boolean
+		IsRunning = (InterlockedCompareExchange(m_Running, 0, 0) <> 0)
+	End Function
+
+	' True once the worker has finished; the result accessors are valid from then on
+	' until EndScan.
+	Public Function IsFinished() As Boolean
+		IsFinished = (InterlockedCompareExchange(m_Finished, 0, 0) <> 0)
+	End Function
+
+	Public Sub RequestCancel()
+		InterlockedExchange m_Cancel, 1
+	End Sub
+
+	Public Function CancelRequested() As Boolean
+		CancelRequested = (InterlockedCompareExchange(m_Cancel, 0, 0) <> 0)
+	End Function
+
+	' .nfo files found so far in the running scan (for a progress display).
+	Public Function ProgressNfoCount() As Long
+		ProgressNfoCount = InterlockedCompareExchange(m_Progress, 0, 0)
+	End Function
+
+	' Waits up to timeoutMs for the worker to end. True if it has ended (or none is running).
+	Public Function WaitForWorker(ByVal timeoutMs As Long) As Boolean
+		If m_hThread = 0 Then
+			WaitForWorker = True
+		Else
+			WaitForWorker = (WaitForSingleObject(m_hThread, timeoutMs) = WAIT_OBJECT_0)
+		End If
+	End Function
+
+	' Releases the finished scan (thread handle, result arrays). Call after IsFinished().
+	Public Sub EndScan()
+		If m_hThread <> 0 Then
+			WaitForSingleObject m_hThread, 5000
+			CloseHandle m_hThread
+			m_hThread = 0
+		End If
+		Erase m_Results
+		m_ShareCount = 0
+		InterlockedExchange m_Running, 0
+	End Sub
+
+	' --- results (valid between IsFinished() = True and EndScan) ---
+
+	Public Function ResultShareCount() As Long
+		ResultShareCount = m_ShareCount
+	End Function
+
+	Public Function ResultRoot(ByVal share As Long) As String
+		ResultRoot = m_Results(share).Root
+	End Function
+
+	Public Function ResultStatus(ByVal share As Long) As ScanShareStatus
+		ResultStatus = m_Results(share).Status
+	End Function
+
+	Public Function ResultWin32Error(ByVal share As Long) As Long
+		ResultWin32Error = m_Results(share).Win32Error
+	End Function
+
+	Public Function ResultFailedFolder(ByVal share As Long) As String
+		ResultFailedFolder = m_Results(share).FailedFolder
+	End Function
+
+	Public Function ResultCount(ByVal share As Long) As Long
+		ResultCount = m_Results(share).Count
+	End Function
+
+	Public Function ResultPath(ByVal share As Long, ByVal index As Long) As String
+		ResultPath = m_Results(share).Paths(index)
+	End Function
+
+	Public Function ResultStamp(ByVal share As Long, ByVal index As Long) As String
+		ResultStamp = m_Results(share).Stamps(index)
+	End Function
+
+	Public Function ResultTarget(ByVal share As Long, ByVal index As Long) As String
+		ResultTarget = m_Results(share).Targets(index)
+	End Function
+
+	' ---------------------------------------------------------------------------------
+	' Worker thread - see the rules at the top
+	' ---------------------------------------------------------------------------------
+
+	Private Function ScanThreadProc(ByVal unused As LongPtr) As Long
+		Dim i As Long
+		For i = 0 To m_ShareCount - 1
+			If WorkerCancelled() Then
+				m_Results(i).Status = sssCancelled
+			Else
+				ScanShare i
+			End If
+		Next
+		InterlockedExchange m_Finished, 1
+		ScanThreadProc = 0
+	End Function
+
+	Private Sub ScanShare(ByVal i As Long)
+		Dim h As LongPtr, fd As WIN32_FIND_DATAW
+
+		m_Results(i).Status = sssOk
+		m_Results(i).Count = 0
+		ReDim m_Results(i).Paths(0 To 255)
+		ReDim m_Results(i).Stamps(0 To 255)
+		ReDim m_Results(i).Targets(0 To 255)
+
+		' reachability first, so an offline server is reported as such
+		h = FindFirst(m_Results(i).Root, fd)
+		If h = INVALID_HANDLE_VALUE Then
+			m_Results(i).Status = sssUnreachable
+			m_Results(i).Win32Error = Err.LastDllError
+			Exit Sub
+		End If
+		FindClose h
+
+		Walk i, m_Results(i).Root, ""
+		If WorkerCancelled() Then m_Results(i).Status = sssCancelled
+	End Sub
+
+	' Recursive walk. showRoot is the nearest ancestor (or this folder) containing a
+	' tvshow.nfo, "" if none.
+	Private Sub Walk(ByVal i As Long, ByVal folder As String, ByVal showRoot As String)
+		Dim h As LongPtr, fd As WIN32_FIND_DATAW, name As String, lastErr As Long
+		Dim subNames() As String, subCount As Long
+		Dim nfoNames() As String, nfoStamps() As String, nfoCount As Long
+		Dim k As Long, entries As Long, target As String
+
+		If m_Results(i).Status <> sssOk Then Exit Sub
+		If WorkerCancelled() Then Exit Sub
+
+		h = FindFirst(folder, fd)
+		If h = INVALID_HANDLE_VALUE Then
+			lastErr = Err.LastDllError
+			' vanished between listing the parent and now - nothing to see there
+			If lastErr = ERROR_FILE_NOT_FOUND Or lastErr = ERROR_PATH_NOT_FOUND Then Exit Sub
+			FailShare i, folder, lastErr
+			Exit Sub
+		End If
+
+		Do
+			name = FileNameOf(fd)
+			If (fd.dwFileAttributes And FILE_ATTRIBUTE_DIRECTORY) <> 0 Then
+				If Not IsSkippedFolder(name, fd.dwFileAttributes) Then
+					ReDim Preserve subNames(0 To subCount)
+					subNames(subCount) = name
+					subCount = subCount + 1
+				End If
+			ElseIf LCase$(Right$(name, 4)) = ".nfo" Then
+				ReDim Preserve nfoNames(0 To nfoCount)
+				ReDim Preserve nfoStamps(0 To nfoCount)
+				nfoNames(nfoCount) = name
+				nfoStamps(nfoCount) = StampOf(fd.ftLastWriteTime)
+				nfoCount = nfoCount + 1
+				If Len(showRoot) = 0 And LCase$(name) = TVSHOW_NFO Then showRoot = folder
+			End If
+			entries = entries + 1
+			If (entries Mod CANCEL_CHECK_EVERY_N_ENTRIES) = 0 Then
+				If WorkerCancelled() Then
+					FindClose h
+					Exit Sub
+				End If
+			End If
+		Loop While FindNextFileW(h, fd) <> 0
+		lastErr = Err.LastDllError
+		FindClose h
+		If lastErr <> ERROR_NO_MORE_FILES Then
+			FailShare i, folder, lastErr
+			Exit Sub
+		End If
+
+		If Len(showRoot) > 0 Then target = showRoot Else target = folder
+		For k = 0 To nfoCount - 1
+			AddResult i, folder & "\" & nfoNames(k), nfoStamps(k), target
+		Next
+
+		For k = 0 To subCount - 1
+			Walk i, folder & "\" & subNames(k), showRoot
+			If m_Results(i).Status <> sssOk Then Exit Sub
+			If WorkerCancelled() Then Exit Sub
+		Next
+	End Sub
+
+	Private Sub AddResult(ByVal i As Long, ByVal path As String, ByVal stamp As String, ByVal target As String)
+		Dim n As Long, newUpper As Long
+		n = m_Results(i).Count
+		If n > UBound(m_Results(i).Paths) Then
+			newUpper = 2 * (UBound(m_Results(i).Paths) + 1) - 1
+			ReDim Preserve m_Results(i).Paths(0 To newUpper)
+			ReDim Preserve m_Results(i).Stamps(0 To newUpper)
+			ReDim Preserve m_Results(i).Targets(0 To newUpper)
+		End If
+		m_Results(i).Paths(n) = path
+		m_Results(i).Stamps(n) = stamp
+		m_Results(i).Targets(n) = target
+		m_Results(i).Count = n + 1
+		InterlockedExchange m_Progress, InterlockedCompareExchange(m_Progress, 0, 0) + 1
+	End Sub
+
+	Private Sub FailShare(ByVal i As Long, ByVal folder As String, ByVal win32Error As Long)
+		m_Results(i).Status = sssFolderFailed
+		m_Results(i).FailedFolder = folder
+		m_Results(i).Win32Error = win32Error
+	End Sub
+
+	Private Function WorkerCancelled() As Boolean
+		WorkerCancelled = (InterlockedCompareExchange(m_Cancel, 0, 0) <> 0)
+	End Function
+
+	' Starts enumerating folder\*. Uses the fast Win7+ variant while it works, otherwise the
+	' standard one (Windows XP/Vista). Err.LastDllError is that of the last API call made.
+	Private Function FindFirst(ByVal folder As String, ByRef fd As WIN32_FIND_DATAW) As LongPtr
+		Dim h As LongPtr
+		If Not m_NoFastFind Then
+			h = FindFirstFileExW(StrPtr(folder & "\*"), FIND_EX_INFO_BASIC, fd, _
+				FIND_EX_SEARCH_NAME_MATCH, 0, FIND_FIRST_EX_LARGE_FETCH)
+			If h <> INVALID_HANDLE_VALUE Or Err.LastDllError <> ERROR_INVALID_PARAMETER Then
+				FindFirst = h
+				Exit Function
+			End If
+			m_NoFastFind = True
+		End If
+		FindFirst = FindFirstFileExW(StrPtr(folder & "\*"), FIND_EX_INFO_STANDARD, fd, _
+			FIND_EX_SEARCH_NAME_MATCH, 0, 0)
+	End Function
+
+	' Skipped: . and .., reparse points (junctions/symlinks - avoids loops), hidden+system
+	' folders, NAS housekeeping folders (@eaDir and other "@" names, #recycle, #snapshot,
+	' $RECYCLE.BIN).
+	Private Function IsSkippedFolder(ByVal name As String, ByVal attributes As Long) As Boolean
+		If name = "." Or name = ".." Then
+			IsSkippedFolder = True
+		ElseIf (attributes And FILE_ATTRIBUTE_REPARSE_POINT) <> 0 Then
+			IsSkippedFolder = True
+		ElseIf (attributes And (FILE_ATTRIBUTE_HIDDEN Or FILE_ATTRIBUTE_SYSTEM)) = _
+				(FILE_ATTRIBUTE_HIDDEN Or FILE_ATTRIBUTE_SYSTEM) Then
+			IsSkippedFolder = True
+		ElseIf Left$(name, 1) = "@" Then
+			IsSkippedFolder = True
+		Else
+			Select Case LCase$(name)
+				Case "#recycle", "#snapshot", "$recycle.bin"
+					IsSkippedFolder = True
+			End Select
+		End If
+	End Function
+
+	Private Function FileNameOf(ByRef fd As WIN32_FIND_DATAW) As String
+		Dim n As Long, k As Long, s As String
+		Do While n <= 259
+			If fd.cFileName(n) = 0 Then Exit Do
+			n = n + 1
+		Loop
+		s = Space$(n)
+		For k = 0 To n - 1
+			Mid$(s, k + 1, 1) = ChrW$(fd.cFileName(k) And &HFFFF&)
+		Next
+		FileNameOf = s
+	End Function
+
+	Private Function StampOf(ByRef ft As FILETIME) As String
+		StampOf = Right$("0000000" & Hex$(ft.dwHighDateTime), 8) & Right$("0000000" & Hex$(ft.dwLowDateTime), 8)
+	End Function
+
+End Module

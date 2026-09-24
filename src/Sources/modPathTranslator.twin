@@ -1,5 +1,88 @@
 Module modPathTranslator
 
-	' add your procedures here
+	' Pure, stateless conversion between the Windows UNC form of a folder path
+	' (\\server\share\dir) and the smb:// form Kodi's JSON-RPC API expects
+	' (smb://server/share/dir/).
+	'
+	' Deliberately a blind prefix/separator substitution - see "Path translation is a
+	' simple, deterministic string rule" in docs/ARCHITECTURE.md. Not supported (and
+	' rejected rather than silently mangled): credentials embedded in an smb:// URI.
+	'
+	' OPEN: encoding of special characters (accents, &, #, %, ...) between the two forms
+	' has not been verified against Kodi yet. Characters are passed through unchanged,
+	' which matches how Kodi stores smb:// paths in its path table - verify with a few
+	' real "difficult" titles before relying on it.
+
+	Private Const UNC_PREFIX As String = "\\"
+	Private Const UNC_LONG_PREFIX As String = "\\?\UNC\"
+	Private Const SMB_PREFIX As String = "smb://"
+
+	' True if the given string looks like a UNC path (\\server\share...).
+	Public Function IsUncPath(ByVal path As String) As Boolean
+		Dim p As String, rest As String, sepPos As Long
+		p = NormalizeFolder(path)
+		If Left$(p, Len(UNC_PREFIX)) <> UNC_PREFIX Then Exit Function
+		' needs at least "\\server\share": a non-empty server name, a separator, a share name
+		rest = Mid$(p, Len(UNC_PREFIX) + 1)
+		sepPos = InStr(rest, "\")
+		IsUncPath = (sepPos > 1) And (sepPos < Len(rest))
+	End Function
+
+	' Trims whitespace, removes a \\?\UNC\ long-path prefix and any trailing backslashes.
+	' Works for local paths too (a drive root like "Y:\" becomes "Y:").
+	Public Function NormalizeFolder(ByVal path As String) As String
+		Dim p As String
+		p = StripLongPrefix(Trim$(path))
+		Do While Len(p) > 0 And Right$(p, 1) = "\"
+			p = Left$(p, Len(p) - 1)
+		Loop
+		NormalizeFolder = p
+	End Function
+
+	' \\server\share\dir  ->  smb://server/share/dir/
+	' Meant for folders: the result always ends with "/", which Kodi requires for a
+	' directory passed to VideoLibrary.Scan.
+	Public Function UncToSmb(ByVal uncPath As String) As String
+		Dim p As String
+		If Not IsUncPath(uncPath) Then
+			Err.Raise 5, "modPathTranslator.UncToSmb", Res(rid_Err_NotUncPath, uncPath)
+		End If
+		p = Mid$(NormalizeFolder(uncPath), Len(UNC_PREFIX) + 1)
+		p = Replace(p, "\", "/")
+		UncToSmb = SMB_PREFIX & p & "/"
+	End Function
+
+	' smb://server/share/dir/  ->  \\server\share\dir
+	' The result has no trailing backslash.
+	Public Function SmbToUnc(ByVal smbPath As String) As String
+		Dim p As String, authority As String, slashPos As Long
+		p = Trim$(smbPath)
+		If StrComp(Left$(p, Len(SMB_PREFIX)), SMB_PREFIX, vbTextCompare) <> 0 Then
+			Err.Raise 5, "modPathTranslator.SmbToUnc", Res(rid_Err_NotSmbPath, smbPath)
+		End If
+		p = Mid$(p, Len(SMB_PREFIX) + 1)
+
+		slashPos = InStr(p, "/")
+		If slashPos > 0 Then authority = Left$(p, slashPos - 1) Else authority = p
+		If InStr(authority, "@") > 0 Then
+			Err.Raise 5, "modPathTranslator.SmbToUnc", Res(rid_Err_SmbCredentials, smbPath)
+		End If
+		If Len(authority) = 0 Then
+			Err.Raise 5, "modPathTranslator.SmbToUnc", Res(rid_Err_SmbNoServer, smbPath)
+		End If
+
+		Do While Len(p) > 0 And Right$(p, 1) = "/"
+			p = Left$(p, Len(p) - 1)
+		Loop
+		SmbToUnc = UNC_PREFIX & Replace(p, "/", "\")
+	End Function
+
+	Private Function StripLongPrefix(ByVal p As String) As String
+		If StrComp(Left$(p, Len(UNC_LONG_PREFIX)), UNC_LONG_PREFIX, vbTextCompare) = 0 Then
+			StripLongPrefix = UNC_PREFIX & Mid$(p, Len(UNC_LONG_PREFIX) + 1)
+		Else
+			StripLongPrefix = p
+		End If
+	End Function
 
 End Module

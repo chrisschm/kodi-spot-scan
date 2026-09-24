@@ -1,5 +1,299 @@
 Class clsKodiClient
 
-	' add your member fields and procedures here
+	' Wraps the JSON-RPC-over-HTTP calls to one Kodi instance:
+	'   - TestConnection: JSONRPC.Ping
+	'   - ScanDirectory:  VideoLibrary.Scan with a "directory" parameter (targeted scan)
+	'
+	' The target (Host/Port) is pure configuration - Kodi may run on another machine than
+	' kodi-spot-scan, see "The Kodi target is independent of which machine runs the watcher"
+	' in docs/ARCHITECTURE.md. No credentials are sent (see "No credential handling"); a Kodi
+	' web server that requires authentication answers HTTP 401, which is reported as such.
+	'
+	' HTTP goes through the late-bound WinHttp.WinHttpRequest.5.1 COM object (part of every
+	' supported Windows version, no project reference needed). The request body is pure ASCII:
+	' non-ASCII characters in paths are sent as JSON \uXXXX escapes, so no charset conversion
+	' by WinHttp can mangle them.
+	'
+	' Calls are synchronous; the UI is blocked for at most TimeoutSeconds per call.
+
+	Private m_Host As String
+	Private m_Port As Long
+	Private m_TimeoutSeconds As Long
+	Private m_LastError As String
+	Private m_LastResponse As String
+	Private m_NextId As Long
+
+	Private Sub Class_Initialize()
+		m_Port = 8080
+		m_TimeoutSeconds = 10
+		m_NextId = 1
+	End Sub
+
+	' ---------------------------------------------------------------------------------
+	' Configuration
+	' ---------------------------------------------------------------------------------
+
+	Public Property Get Host() As String
+		Host = m_Host
+	End Property
+
+	' Host name or IP address only (the port goes into Port). A leading "http://" and
+	' trailing slashes are stripped.
+	Public Property Let Host(ByVal value As String)
+		value = Trim$(value)
+		If StrComp(Left$(value, 7), "http://", vbTextCompare) = 0 Then value = Mid$(value, 8)
+		Do While Len(value) > 0 And Right$(value, 1) = "/"
+			value = Left$(value, Len(value) - 1)
+		Loop
+		m_Host = value
+	End Property
+
+	Public Property Get Port() As Long
+		Port = m_Port
+	End Property
+
+	Public Property Let Port(ByVal value As Long)
+		If value < 1 Or value > 65535 Then
+			Err.Raise 5, "clsKodiClient.Port", Res(rid_Err_KodiPortRange)
+		End If
+		m_Port = value
+	End Property
+
+	Public Property Get TimeoutSeconds() As Long
+		TimeoutSeconds = m_TimeoutSeconds
+	End Property
+
+	Public Property Let TimeoutSeconds(ByVal value As Long)
+		If value < 1 Then value = 1
+		m_TimeoutSeconds = value
+	End Property
+
+	' Human-readable reason for the last failed call (empty after a successful one).
+	Public Property Get LastError() As String
+		LastError = m_LastError
+	End Property
+
+	' Raw body of the last HTTP response, for the log / troubleshooting.
+	Public Property Get LastResponse() As String
+		LastResponse = m_LastResponse
+	End Property
+
+	Public Property Get EndpointUrl() As String
+		EndpointUrl = "http://" & m_Host & ":" & CStr(m_Port) & "/jsonrpc"
+	End Property
+
+	' ---------------------------------------------------------------------------------
+	' Kodi calls
+	' ---------------------------------------------------------------------------------
+
+	' True if Kodi answers JSONRPC.Ping with "pong". On failure see LastError.
+	Public Function TestConnection() As Boolean
+		Dim resp As String
+		If Not CallMethod("JSONRPC.Ping", "", resp) Then Exit Function
+		If InStr(1, StripWhitespace(resp), """result"":""pong""", vbTextCompare) > 0 Then
+			TestConnection = True
+		Else
+			m_LastError = Res(rid_Err_KodiUnexpectedAnswer, resp)
+		End If
+	End Function
+
+	' Asks Kodi to scan exactly one folder, given in smb:// form (see modPathTranslator).
+	' True if Kodi accepted the request ("OK"). Kodi runs the scan asynchronously, so this
+	' does not mean the scan has finished or found anything. On failure see LastError.
+	Public Function ScanDirectory(ByVal smbPath As String) As Boolean
+		Dim resp As String, params As String
+		If Len(smbPath) = 0 Then
+			m_LastError = Res(rid_Err_KodiNoDirectory)
+			Exit Function
+		End If
+		params = "{""directory"":" & JsonString(smbPath) & ",""showdialogs"":false}"
+		If Not CallMethod("VideoLibrary.Scan", params, resp) Then Exit Function
+		If InStr(1, StripWhitespace(resp), """result"":""OK""", vbTextCompare) > 0 Then
+			ScanDirectory = True
+		Else
+			m_LastError = Res(rid_Err_KodiUnexpectedAnswer, resp)
+		End If
+	End Function
+
+	' ---------------------------------------------------------------------------------
+	' Transport
+	' ---------------------------------------------------------------------------------
+
+	' Sends one JSON-RPC request. paramsJson is either "" (no params) or a JSON object.
+	' Returns True if an HTTP 200 answer without a JSON-RPC "error" member came back.
+	Private Function CallMethod(ByVal method As String, ByVal paramsJson As String, _
+			ByRef response As String) As Boolean
+		Dim req As Object, body As String, status As Long, timeoutMs As Long
+
+		m_LastError = ""
+		m_LastResponse = ""
+		response = ""
+
+		If Len(m_Host) = 0 Then
+			m_LastError = Res(rid_Err_KodiNoHost)
+			Exit Function
+		End If
+
+		body = "{""jsonrpc"":""2.0"",""method"":" & JsonString(method)
+		If Len(paramsJson) > 0 Then body = body & ",""params"":" & paramsJson
+		body = body & ",""id"":" & CStr(m_NextId) & "}"
+		m_NextId = m_NextId + 1
+		If m_NextId > 1000000 Then m_NextId = 1
+
+		timeoutMs = m_TimeoutSeconds * 1000
+
+		On Error GoTo TransportError
+		Set req = CreateObject("WinHttp.WinHttpRequest.5.1")
+		' resolve, connect, send, receive
+		req.SetTimeouts timeoutMs, timeoutMs, timeoutMs, timeoutMs
+		req.Open "POST", EndpointUrl, False
+		req.SetRequestHeader "Content-Type", "application/json"
+		req.Send body
+		status = req.Status
+		response = req.ResponseText
+		On Error GoTo 0
+
+		m_LastResponse = response
+
+		Select Case status
+			Case 200
+				' fall through to JSON-RPC error check
+			Case 401
+				m_LastError = Res(rid_Err_KodiAuthRequired)
+				Exit Function
+			Case Else
+				m_LastError = Res(rid_Err_KodiHttpStatus, status)
+				Exit Function
+		End Select
+
+		If InStr(1, response, """error""", vbBinaryCompare) > 0 Then
+			m_LastError = Res(rid_Err_KodiReportedError, JsonErrorMessage(response))
+			Exit Function
+		End If
+
+		CallMethod = True
+		Exit Function
+
+	TransportError:
+		m_LastError = Res(rid_Err_KodiUnreachable, EndpointUrl, Trim$(Err.Description))
+	End Function
+
+	' ---------------------------------------------------------------------------------
+	' Minimal JSON helpers (no general JSON parser needed for the two calls above)
+	' ---------------------------------------------------------------------------------
+
+	' Quotes and escapes a string as a JSON string literal; everything outside printable
+	' ASCII is written as \uXXXX so the request body stays pure ASCII.
+	Private Function JsonString(ByVal s As String) As String
+		Dim i As Long, code As Long, ch As String, out As String
+		out = """"
+		For i = 1 To Len(s)
+			ch = Mid$(s, i, 1)
+			code = AscW(ch) And &HFFFF&
+			Select Case code
+				Case 34     ' "
+					out = out & "\"""
+				Case 92     ' \
+					out = out & "\\"
+				Case 32 To 126
+					out = out & ch
+				Case 8
+					out = out & "\b"
+				Case 9
+					out = out & "\t"
+				Case 10
+					out = out & "\n"
+				Case 12
+					out = out & "\f"
+				Case 13
+					out = out & "\r"
+				Case Else
+					out = out & "\u" & Right$("000" & LCase$(Hex$(code)), 4)
+			End Select
+		Next
+		JsonString = out & """"
+	End Function
+
+	' Pulls "message" (and "code") out of a JSON-RPC error answer; falls back to the raw text.
+	Private Function JsonErrorMessage(ByVal response As String) As String
+		Dim msg As String, code As String
+		msg = JsonStringValue(response, "message")
+		code = JsonNumberValue(response, "code")
+		If Len(msg) = 0 Then
+			JsonErrorMessage = response
+		ElseIf Len(code) > 0 Then
+			JsonErrorMessage = Res(rid_Err_KodiErrorWithCode, msg, code)
+		Else
+			JsonErrorMessage = msg
+		End If
+	End Function
+
+	' Value of the first "key":"..." occurrence, with basic unescaping. "" if not found.
+	Private Function JsonStringValue(ByVal json As String, ByVal key As String) As String
+		Dim p As Long, i As Long, ch As String, out As String
+		p = FindJsonKey(json, key)
+		If p = 0 Then Exit Function
+		If Mid$(json, p, 1) <> """" Then Exit Function
+		i = p + 1
+		Do While i <= Len(json)
+			ch = Mid$(json, i, 1)
+			If ch = """" Then Exit Do
+			If ch = "\" And i < Len(json) Then
+				i = i + 1
+				ch = Mid$(json, i, 1)
+				Select Case ch
+					Case "n": ch = vbLf
+					Case "r": ch = vbCr
+					Case "t": ch = vbTab
+					Case "u"
+						If i + 4 <= Len(json) Then
+							ch = ChrW$(CLng("&H" & Mid$(json, i + 1, 4) & "&"))
+							i = i + 4
+						End If
+				End Select
+			End If
+			out = out & ch
+			i = i + 1
+		Loop
+		JsonStringValue = out
+	End Function
+
+	' Value of the first "key":<number> occurrence as text. "" if not found.
+	Private Function JsonNumberValue(ByVal json As String, ByVal key As String) As String
+		Dim p As Long, i As Long, ch As String
+		p = FindJsonKey(json, key)
+		If p = 0 Then Exit Function
+		i = p
+		Do While i <= Len(json)
+			ch = Mid$(json, i, 1)
+			If InStr("-0123456789", ch) = 0 Then Exit Do
+			i = i + 1
+		Loop
+		JsonNumberValue = Mid$(json, p, i - p)
+	End Function
+
+	' Position of the first non-blank character after "key": , or 0.
+	Private Function FindJsonKey(ByVal json As String, ByVal key As String) As Long
+		Dim p As Long
+		p = InStr(1, json, """" & key & """", vbBinaryCompare)
+		If p = 0 Then Exit Function
+		p = p + Len(key) + 2
+		Do While p <= Len(json)
+			Select Case Mid$(json, p, 1)
+				Case " ", vbTab, vbCr, vbLf, ":"
+					p = p + 1
+				Case Else
+					Exit Do
+			End Select
+		Loop
+		If p <= Len(json) Then FindJsonKey = p
+	End Function
+
+	Private Function StripWhitespace(ByVal s As String) As String
+		s = Replace(s, " ", "")
+		s = Replace(s, vbTab, "")
+		s = Replace(s, vbCr, "")
+		StripWhitespace = Replace(s, vbLf, "")
+	End Function
 
 End Class

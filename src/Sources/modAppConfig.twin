@@ -1,5 +1,238 @@
 Module modAppConfig
 
-	' add your procedures here
+	' Loads/saves the user settings (watched shares, poll interval, Kodi target) from/to
+	'   %APPDATA%\kodi-spot-scan\kodi-spot-scan.ini
+	' The same folder also holds the watcher's persisted state and the send history - see
+	' "Settings location" in docs/ARCHITECTURE.md.
+	'
+	' The INI file is kept as UTF-16LE (with BOM) so share paths with non-ASCII characters
+	' survive: the *W profile APIs only write Unicode into a file that already starts with
+	' a UTF-16LE BOM, otherwise they create an ANSI file. EnsureUnicodeIniFile takes care
+	' of that before the first write.
+	'
+	' File layout:
+	'   [Kodi]
+	'   Host=192.168.1.20
+	'   Port=8080
+	'   TimeoutSeconds=10
+	'   [Watcher]
+	'   PollIntervalSeconds=120
+	'   [Shares]
+	'   Count=2
+	'   Share1=\\ds\video\Filme
+	'   Share2=\\ds\video\Serien
+
+	Private Declare PtrSafe Function GetPrivateProfileStringW Lib "kernel32" ( _
+		ByVal lpAppName As LongPtr, ByVal lpKeyName As LongPtr, ByVal lpDefault As LongPtr, _
+		ByVal lpReturnedString As LongPtr, ByVal nSize As Long, ByVal lpFileName As LongPtr) As Long
+	Private Declare PtrSafe Function WritePrivateProfileStringW Lib "kernel32" ( _
+		ByVal lpAppName As LongPtr, ByVal lpKeyName As LongPtr, ByVal lpString As LongPtr, _
+		ByVal lpFileName As LongPtr) As Long
+
+	Public Const APP_FOLDER_NAME As String = "kodi-spot-scan"
+	Public Const CONFIG_FILE_NAME As String = "kodi-spot-scan.ini"
+	Public Const STATE_FILE_NAME As String = "watcher-state.txt"
+	Public Const HISTORY_FILE_NAME As String = "history.log"
+
+	Public Const DEFAULT_KODI_PORT As Long = 8080
+	Public Const DEFAULT_KODI_TIMEOUT_SECONDS As Long = 10
+	Public Const DEFAULT_POLL_INTERVAL_SECONDS As Long = 120
+	Public Const MIN_POLL_INTERVAL_SECONDS As Long = 15
+	Public Const MAX_POLL_INTERVAL_SECONDS As Long = 86400
+
+	Private Const SECTION_KODI As String = "Kodi"
+	Private Const SECTION_WATCHER As String = "Watcher"
+	Private Const SECTION_SHARES As String = "Shares"
+
+	' Current settings. Filled by LoadConfig, written by SaveConfig.
+	' KodiHost is empty until configured - the Kodi target is never assumed to be localhost.
+	Public KodiHost As String
+	Public KodiPort As Long
+	Public KodiTimeoutSeconds As Long
+	Public PollIntervalSeconds As Long
+	Public Shares As Collection            ' of String, UNC folder paths
+
+	' %APPDATA%\kodi-spot-scan - created on first use.
+	Public Function ConfigFolder() As String
+		Dim p As String
+		p = Environ$("APPDATA")
+		If Len(p) = 0 Then
+			Err.Raise 76, "modAppConfig.ConfigFolder", Res(rid_Err_AppDataMissing)
+		End If
+		p = p & "\" & APP_FOLDER_NAME
+		If Not FolderExists(p) Then MkDir p
+		ConfigFolder = p
+	End Function
+
+	Public Function ConfigFilePath() As String
+		ConfigFilePath = ConfigFolder() & "\" & CONFIG_FILE_NAME
+	End Function
+
+	Public Function StateFilePath() As String
+		StateFilePath = ConfigFolder() & "\" & STATE_FILE_NAME
+	End Function
+
+	Public Function HistoryFilePath() As String
+		HistoryFilePath = ConfigFolder() & "\" & HISTORY_FILE_NAME
+	End Function
+
+	' True once a Kodi host has been entered.
+	Public Function IsKodiConfigured() As Boolean
+		IsKodiConfigured = (Len(Trim$(KodiHost)) > 0)
+	End Function
+
+	' Resets all settings to their defaults (no shares, no Kodi host).
+	Public Sub SetDefaults()
+		KodiHost = ""
+		KodiPort = DEFAULT_KODI_PORT
+		KodiTimeoutSeconds = DEFAULT_KODI_TIMEOUT_SECONDS
+		PollIntervalSeconds = DEFAULT_POLL_INTERVAL_SECONDS
+		Set Shares = New Collection
+	End Sub
+
+	' Loads all settings; missing or invalid values fall back to defaults.
+	Public Sub LoadConfig()
+		Dim f As String, n As Long, i As Long, s As String
+		f = ConfigFilePath()
+
+		KodiHost = Trim$(ReadIni(f, SECTION_KODI, "Host", ""))
+		KodiPort = ClampLong(ParseLong(ReadIni(f, SECTION_KODI, "Port", ""), DEFAULT_KODI_PORT), 1, 65535)
+		KodiTimeoutSeconds = ClampLong(ParseLong(ReadIni(f, SECTION_KODI, "TimeoutSeconds", ""), _
+			DEFAULT_KODI_TIMEOUT_SECONDS), 1, 300)
+		PollIntervalSeconds = ClampLong(ParseLong(ReadIni(f, SECTION_WATCHER, "PollIntervalSeconds", ""), _
+			DEFAULT_POLL_INTERVAL_SECONDS), MIN_POLL_INTERVAL_SECONDS, MAX_POLL_INTERVAL_SECONDS)
+
+		Set Shares = New Collection
+		n = ParseLong(ReadIni(f, SECTION_SHARES, "Count", ""), 0)
+		For i = 1 To n
+			s = Trim$(ReadIni(f, SECTION_SHARES, "Share" & CStr(i), ""))
+			If Len(s) > 0 Then Shares.Add s
+		Next
+	End Sub
+
+	' Writes all settings. Raises an error if the file can't be written.
+	Public Sub SaveConfig()
+		Dim f As String, i As Long, share As Variant
+		f = ConfigFilePath()
+		EnsureUnicodeIniFile f
+
+		If Shares Is Nothing Then Set Shares = New Collection
+		PollIntervalSeconds = ClampLong(PollIntervalSeconds, MIN_POLL_INTERVAL_SECONDS, MAX_POLL_INTERVAL_SECONDS)
+		KodiPort = ClampLong(KodiPort, 1, 65535)
+		KodiTimeoutSeconds = ClampLong(KodiTimeoutSeconds, 1, 300)
+
+		WriteIni f, SECTION_KODI, "Host", Trim$(KodiHost)
+		WriteIni f, SECTION_KODI, "Port", CStr(KodiPort)
+		WriteIni f, SECTION_KODI, "TimeoutSeconds", CStr(KodiTimeoutSeconds)
+		WriteIni f, SECTION_WATCHER, "PollIntervalSeconds", CStr(PollIntervalSeconds)
+
+		' rewrite [Shares] from scratch so removed entries don't linger
+		DeleteIniSection f, SECTION_SHARES
+		WriteIni f, SECTION_SHARES, "Count", CStr(Shares.Count)
+		i = 0
+		For Each share In Shares
+			i = i + 1
+			WriteIni f, SECTION_SHARES, "Share" & CStr(i), CStr(share)
+		Next
+	End Sub
+
+	' Appends one line to the send history (history.log, UTF-16LE with BOM like the other
+	' files here, so non-ASCII folder names survive). Failures are ignored - the history is a
+	' convenience, never a reason to interrupt the user.
+	Public Sub AppendHistory(ByVal line As String)
+		Dim f As String, fn As Integer, b() As Byte, s As String
+		On Error GoTo Done
+		f = HistoryFilePath()
+		If FileExists(f) Then s = "" Else s = ChrW$(&HFEFF&)
+		s = s & Format$(Now, "yyyy-mm-dd hh:nn:ss") & vbTab & line & vbCrLf
+		b = s
+		fn = FreeFile
+		Open f For Binary Access Write As #fn
+		Seek #fn, LOF(fn) + 1
+		Put #fn, , b
+		Close #fn
+		fn = 0
+		Exit Sub
+	Done:
+		If fn <> 0 Then Close #fn
+	End Sub
+
+	' ---------------------------------------------------------------------------------
+	' INI helpers
+	' ---------------------------------------------------------------------------------
+
+	Private Function ReadIni(ByVal file As String, ByVal section As String, ByVal key As String, _
+			ByVal defaultValue As String) As String
+		Dim buf As String, n As Long
+		buf = String$(4096, vbNullChar)
+		n = GetPrivateProfileStringW(StrPtr(section), StrPtr(key), StrPtr(defaultValue), _
+			StrPtr(buf), Len(buf), StrPtr(file))
+		ReadIni = Left$(buf, n)
+	End Function
+
+	Private Sub WriteIni(ByVal file As String, ByVal section As String, ByVal key As String, _
+			ByVal value As String)
+		If WritePrivateProfileStringW(StrPtr(section), StrPtr(key), StrPtr(value), StrPtr(file)) = 0 Then
+			Err.Raise 75, "modAppConfig.WriteIni", _
+				Res(rid_Err_ConfigWriteFailed, section, key, file, Err.LastDllError)
+		End If
+	End Sub
+
+	Private Sub DeleteIniSection(ByVal file As String, ByVal section As String)
+		' key = NULL deletes the whole section; failure (e.g. section absent) is harmless here
+		WritePrivateProfileStringW StrPtr(section), 0, 0, StrPtr(file)
+	End Sub
+
+	' Creates an empty UTF-16LE file (BOM only) if the INI doesn't exist yet.
+	Private Sub EnsureUnicodeIniFile(ByVal file As String)
+		Dim bom(0 To 1) As Byte, fn As Integer
+		If FileExists(file) Then Exit Sub
+		bom(0) = &HFF
+		bom(1) = &HFE
+		fn = FreeFile
+		Open file For Binary Access Write As #fn
+		Put #fn, , bom
+		Close #fn
+	End Sub
+
+	' ---------------------------------------------------------------------------------
+	' Small general helpers
+	' ---------------------------------------------------------------------------------
+
+	Public Function FolderExists(ByVal path As String) As Boolean
+		Dim attr As Long
+		On Error GoTo NotFound
+		attr = GetAttr(path)
+		FolderExists = ((attr And vbDirectory) <> 0)
+	NotFound:
+	End Function
+
+	Public Function FileExists(ByVal path As String) As Boolean
+		Dim attr As Long
+		On Error GoTo NotFound
+		attr = GetAttr(path)
+		FileExists = ((attr And vbDirectory) = 0)
+	NotFound:
+	End Function
+
+	Private Function ParseLong(ByVal s As String, ByVal defaultValue As Long) As Long
+		s = Trim$(s)
+		ParseLong = defaultValue
+		If Len(s) = 0 Then Exit Function
+		If Not IsNumeric(s) Then Exit Function
+		On Error GoTo Invalid
+		ParseLong = CLng(s)
+	Invalid:
+	End Function
+
+	Private Function ClampLong(ByVal v As Long, ByVal minValue As Long, ByVal maxValue As Long) As Long
+		If v < minValue Then
+			ClampLong = minValue
+		ElseIf v > maxValue Then
+			ClampLong = maxValue
+		Else
+			ClampLong = v
+		End If
+	End Function
 
 End Module

@@ -3,7 +3,230 @@
 [PredeclaredId]
 Class frmSettings
 
+	' Modal settings dialog: watched shares, poll interval, Kodi target (+ connection test).
+	' Works on copies of the modAppConfig values; only OK validates, writes them back and
+	' saves the INI. The caller reads Saved after the dialog closes and then unloads it:
+	'   frmSettings.Show vbModal, Me
+	'   saved = frmSettings.Saved
+	'   Unload frmSettings
+
+	Private m_Saved As Boolean
+
 	Sub New()
 	End Sub
+
+	' True if the dialog was closed with OK and the settings were saved.
+	Public Property Get Saved() As Boolean
+		Saved = m_Saved
+	End Property
+
+	' ---------------------------------------------------------------------------------
+	' Form lifecycle
+	' ---------------------------------------------------------------------------------
+
+	Private Sub Form_Load()
+		Dim share As Variant
+
+		m_Saved = False
+		ApplyCaptions
+
+		txtKodiPort.MaxLength = 5
+
+		lstShares.Clear
+		If Not modAppConfig.Shares Is Nothing Then
+			For Each share In modAppConfig.Shares
+				lstShares.AddItem CStr(share)
+			Next
+		End If
+		txtShare.Text = ""
+		txtPollInterval.Text = CStr(modAppConfig.PollIntervalSeconds)
+		txtKodiHost.Text = modAppConfig.KodiHost
+		txtKodiPort.Text = CStr(modAppConfig.KodiPort)
+		lblTestResult.Caption = ""
+		UpdateButtons
+	End Sub
+
+	Private Sub Form_QueryUnload(Cancel As Integer, UnloadMode As Integer)
+		' closing via the window's X = Cancel; keep the instance so the caller can read Saved
+		If UnloadMode = vbFormControlMenu Then
+			Cancel = 1
+			Me.Hide
+		End If
+	End Sub
+
+	' ---------------------------------------------------------------------------------
+	' Shares
+	' ---------------------------------------------------------------------------------
+
+	Private Sub cmdAddShare_Click()
+		Dim p As String, i As Long
+
+		p = modPathTranslator.NormalizeFolder(txtShare.Text)
+		If Not modPathTranslator.IsUncPath(p) Then
+			MsgBox Res(rid_frmSettings_Err_ShareNotUnc), vbExclamation, Me.Caption
+			txtShare.SetFocus
+			Exit Sub
+		End If
+
+		For i = 0 To lstShares.ListCount - 1
+			If StrComp(lstShares.List(i), p, vbTextCompare) = 0 Then
+				MsgBox Res(rid_frmSettings_Err_ShareDuplicate), vbExclamation, Me.Caption
+				lstShares.ListIndex = i
+				Exit Sub
+			End If
+		Next
+
+		Me.MousePointer = vbHourglass
+		If Not modAppConfig.FolderExists(p & "\") Then
+			Me.MousePointer = vbDefault
+			If MsgBox(Res(rid_frmSettings_Ask_ShareUnreachable, p), vbQuestion Or vbYesNo, Me.Caption) <> vbYes Then
+				Exit Sub
+			End If
+		End If
+		Me.MousePointer = vbDefault
+
+		lstShares.AddItem p
+		lstShares.ListIndex = lstShares.NewIndex
+		txtShare.Text = ""
+		UpdateButtons
+	End Sub
+
+	Private Sub cmdRemoveShare_Click()
+		Dim i As Long
+		i = lstShares.ListIndex
+		If i < 0 Then Exit Sub
+		lstShares.RemoveItem i
+		If lstShares.ListCount > 0 Then
+			If i >= lstShares.ListCount Then i = lstShares.ListCount - 1
+			lstShares.ListIndex = i
+		End If
+		UpdateButtons
+	End Sub
+
+	Private Sub lstShares_Click()
+		UpdateButtons
+	End Sub
+
+	Private Sub lstShares_KeyDown(KeyCode As Integer, Shift As Integer)
+		If KeyCode = vbKeyDelete Then cmdRemoveShare_Click
+	End Sub
+
+	' While typing a share path, Enter means "Add", not "OK".
+	Private Sub txtShare_GotFocus()
+		cmdAddShare.Default = True
+	End Sub
+
+	Private Sub txtShare_LostFocus()
+		cmdOK.Default = True
+	End Sub
+
+	' ---------------------------------------------------------------------------------
+	' Kodi
+	' ---------------------------------------------------------------------------------
+
+	Private Sub cmdTestConnection_Click()
+		Dim kodi As clsKodiClient, port As Long
+
+		If Not TryParseRange(txtKodiPort.Text, 1, 65535, port) Then
+			MsgBox Res(rid_frmSettings_Err_Port), vbExclamation, Me.Caption
+			txtKodiPort.SetFocus
+			Exit Sub
+		End If
+
+		Set kodi = New clsKodiClient
+		kodi.Host = txtKodiHost.Text
+		kodi.Port = port
+		kodi.TimeoutSeconds = modAppConfig.KodiTimeoutSeconds
+
+		lblTestResult.Caption = Res(rid_frmSettings_Test_Running)
+		lblTestResult.Refresh
+		Me.MousePointer = vbHourglass
+		If kodi.TestConnection() Then
+			lblTestResult.Caption = Res(rid_frmSettings_Test_Ok)
+		Else
+			lblTestResult.Caption = Res(rid_frmSettings_Test_Failed, kodi.LastError)
+		End If
+		Me.MousePointer = vbDefault
+	End Sub
+
+	' ---------------------------------------------------------------------------------
+	' OK / Cancel
+	' ---------------------------------------------------------------------------------
+
+	Private Sub cmdOK_Click()
+		Dim interval As Long, port As Long, i As Long
+
+		If Not TryParseRange(txtPollInterval.Text, MIN_POLL_INTERVAL_SECONDS, MAX_POLL_INTERVAL_SECONDS, interval) Then
+			MsgBox Res(rid_frmSettings_Err_PollInterval, MIN_POLL_INTERVAL_SECONDS, MAX_POLL_INTERVAL_SECONDS), _
+				vbExclamation, Me.Caption
+			txtPollInterval.SetFocus
+			Exit Sub
+		End If
+		If Not TryParseRange(txtKodiPort.Text, 1, 65535, port) Then
+			MsgBox Res(rid_frmSettings_Err_Port), vbExclamation, Me.Caption
+			txtKodiPort.SetFocus
+			Exit Sub
+		End If
+
+		modAppConfig.PollIntervalSeconds = interval
+		modAppConfig.KodiPort = port
+		modAppConfig.KodiHost = Trim$(txtKodiHost.Text)
+		Set modAppConfig.Shares = New Collection
+		For i = 0 To lstShares.ListCount - 1
+			modAppConfig.Shares.Add lstShares.List(i)
+		Next
+
+		On Error GoTo SaveFailed
+		modAppConfig.SaveConfig
+		On Error GoTo 0
+
+		m_Saved = True
+		Me.Hide
+		Exit Sub
+
+	SaveFailed:
+		MsgBox Res(rid_frmSettings_Err_Save, Err.Description), vbCritical, Me.Caption
+	End Sub
+
+	Private Sub cmdCancel_Click()
+		Me.Hide
+	End Sub
+
+	' ---------------------------------------------------------------------------------
+	' Helpers
+	' ---------------------------------------------------------------------------------
+
+	Private Sub ApplyCaptions()
+		Me.Caption = Res(rid_frmSettings_Caption)
+		fraShares.Caption = Res(rid_frmSettings_fraShares_Caption)
+		cmdAddShare.Caption = Res(rid_frmSettings_cmdAddShare_Caption)
+		cmdRemoveShare.Caption = Res(rid_frmSettings_cmdRemoveShare_Caption)
+		fraWatcher.Caption = Res(rid_frmSettings_fraWatcher_Caption)
+		lblPollInterval.Caption = Res(rid_frmSettings_lblPollInterval_Caption)
+		fraKodi.Caption = Res(rid_frmSettings_fraKodi_Caption)
+		lblKodiHost.Caption = Res(rid_frmSettings_lblKodiHost_Caption)
+		lblKodiPort.Caption = Res(rid_frmSettings_lblKodiPort_Caption)
+		cmdTestConnection.Caption = Res(rid_frmSettings_cmdTestConnection_Caption)
+		cmdOK.Caption = Res(rid_frmSettings_cmdOK_Caption)
+		cmdCancel.Caption = Res(rid_frmSettings_cmdCancel_Caption)
+	End Sub
+
+	Private Sub UpdateButtons()
+		cmdRemoveShare.Enabled = (lstShares.ListIndex >= 0)
+	End Sub
+
+	' Whole number within [minValue, maxValue]?
+	Private Function TryParseRange(ByVal text As String, ByVal minValue As Long, ByVal maxValue As Long, _
+			ByRef value As Long) As Boolean
+		Dim d As Double
+		text = Trim$(text)
+		If Len(text) = 0 Or Len(text) > 9 Then Exit Function
+		If Not IsNumeric(text) Then Exit Function
+		d = CDbl(text)
+		If d <> Int(d) Then Exit Function
+		If d < minValue Or d > maxValue Then Exit Function
+		value = CLng(d)
+		TryParseRange = True
+	End Function
 
 End Class
