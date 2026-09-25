@@ -198,6 +198,24 @@
         "LCID_0407": "Abbrechen"
     },
     {
+        "id": 2012,
+        "name": "frmSettings_cmdBrowseShare_Caption",
+        "LCID_0000": "...",
+        "LCID_0407": "..."
+    },
+    {
+        "id": 2013,
+        "name": "frmSettings_cmdBrowseShare_ToolTip",
+        "LCID_0000": "Select a folder",
+        "LCID_0407": "Ordner auswählen"
+    },
+    {
+        "id": 2014,
+        "name": "frmSettings_BrowseShare_Title",
+        "LCID_0000": "Select a folder on a network share to watch",
+        "LCID_0407": "Ordner auf einer Netzwerkfreigabe zum Beobachten auswählen"
+    },
+    {
         "id": 2020,
         "name": "frmSettings_Err_ShareNotUnc",
         "LCID_0000": "Please enter a UNC path such as \\\\server\\share\\folder.",
@@ -232,6 +250,12 @@
         "name": "frmSettings_Err_Save",
         "LCID_0000": "The settings could not be saved:\n%1",
         "LCID_0407": "Die Einstellungen konnten nicht gespeichert werden:\n%1"
+    },
+    {
+        "id": 2026,
+        "name": "frmSettings_Err_BrowseNotShare",
+        "LCID_0000": "\"%1\" is not on a network share.\nPlease select a folder on a share (\\\\server\\share) or on a mapped network drive.\n\nIf the folder is shared from this PC, enter its share path instead, e.g. \\\\%2\\share\\folder - Kodi needs a network path to reach it.",
+        "LCID_0407": "\"%1\" liegt nicht auf einer Netzwerkfreigabe.\nBitte einen Ordner auf einer Freigabe (\\\\server\\freigabe) oder einem verbundenen Netzlaufwerk auswählen.\n\nIst der Ordner auf diesem PC freigegeben, bitte stattdessen den Freigabepfad eintragen, z. B. \\\\%2\\freigabe\\ordner - Kodi braucht einen Netzwerkpfad, um ihn zu erreichen."
     },
     {
         "id": 2030,

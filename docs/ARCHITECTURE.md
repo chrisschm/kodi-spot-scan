@@ -33,8 +33,9 @@ twinBASIC's Project Explorer shows standard modules and class modules with the s
 | `modScanWorker` | Standard module | The file system walk of `clsShareWatcher`, run in a background thread (`CreateThread` + `AddressOf`, hence a standard module). Delivers per share a flat list of `.nfo` paths, timestamps and target folders. See "Background scan thread" below. |
 | `clsShareWatcher` | Class module | Periodically polls the configured shares for new/changed `.nfo` files, tracks (path, last-modified) state on disk so a restart doesn't re-flag everything, and raises an event per detected folder. Needs a class module for the event and the per-instance state. |
 | `clsKodiClient` | Class module | Wraps the JSON-RPC HTTP call to Kodi (`VideoLibrary.Scan`, plus a connectivity check) against a configured host/port. |
+| `modFolderPicker` | Standard module | Folder selection dialog behind the "..." button in `frmSettings` (modern file dialog in folder mode, classic fallback) and conversion of a folder on a mapped network drive to its UNC path (`WNetGetUniversalNameW`). Declares the COM interfaces it needs (`IFileDialog`, `IShellItem`) itself - no type library or package. |
 | `modStrings` | Standard module | Access to the localized UI strings (`Res(id, args...)` with `%1`-style placeholders) and the `ResId` enum mirroring `Resources/STRING/Strings.json`. See "Localization" below. |
-| `frmMain` | Form | Live list of detected folders (path, detected-at, status) with multi-select and an explicit "send to Kodi" action, plus a short status/history log. |
+| `frmMain` | Form | Live list of detected folders (path, detected-at, status) with multi-select and an explicit "send to Kodi" action, plus a short status/history log. Remembers its size, position and maximized state. |
 | `frmSettings` | Form | Edits watched shares, poll interval, and the Kodi target; includes a "test connection" action. |
 
 ## Key design decisions
@@ -96,6 +97,9 @@ though, in this maintainer's non-domain setup, Roaming vs. Local makes no practi
 
 The same folder holds the watcher's persisted "last seen" state and a short send history/log,
 so everything the tool keeps lives in one place that's easy to inspect or reset.
+
+The main window's placement is stored in the same INI (section `[Window]`), see "Window
+placement" below.
 
 ### Watcher details: baseline, TV shows, failure handling
 
@@ -189,6 +193,32 @@ part of Windows), created via API, instead of the `MSComctlLib.StatusBar` from
 copy on every target PC) and only exists as 32-bit. Controls come from twinBASIC's own
 packages or the Windows API only.
 
+### Share picker: file dialog in folder mode
+
+The "..." button next to the share path opens the modern file dialog in folder mode
+(`IFileOpenDialog` with `FOS_PICKFOLDERS`) rather than the classic folder tree
+(`SHBrowseForFolder`): in the tree, a share that isn't mapped to a drive letter is only
+reachable through "Network" and network discovery, whereas the file dialog's address bar
+accepts `\\server\` directly. The chosen folder is added to the list right away, with the same
+checks as a typed path. A folder on a mapped drive (`Z:\Filme`) is converted to its UNC path;
+local and `subst` drives are rejected, since only shares can be translated to `smb://`. The
+watching PC may well host the share itself, though: such a folder works when entered as a UNC
+path (`\\thispc\share\...`), and the rejection message says so. Resolving a local folder to
+its share automatically (`NetShareEnum`, longest matching share path) is a possible later
+extension. Manual entry stays possible.
+
+### Window placement
+
+`frmMain` saves its restore bounds (`GetWindowPlacement.rcNormalPosition`, pixels), the
+maximized state and the system DPI on close and restores them with `SetWindowPlacement` at the
+end of `Form_Load`, while the form is still hidden. Restore bounds rather than the current
+rectangle, so a window closed maximized reopens maximized *and* restores to its previous size.
+A window closed minimized reopens normal (or maximized, if it was before). If it would end up
+completely off screen (monitor removed, lower resolution), Windows moves it back into view. If
+the display scaling changed in between, the bounds are scaled by the DPI ratio. Requires
+`StartUpPosition = Manual` on the form; without saved values the window is centered on the
+primary screen.
+
 ### No credential handling
 
 The current setup assumes trusted, unauthenticated (or already OS-level authenticated) access to
@@ -210,8 +240,11 @@ only, never in the README or user-facing wiki.
   - `modScanWorker.FindFirst`: `FindFirstFileExW` with `FindExInfoBasic` +
     `FIND_FIRST_EX_LARGE_FETCH` (Windows 7+); on `ERROR_INVALID_PARAMETER` it switches once to
     the standard call (Windows XP/Vista).
-  - Planned share picker: `IFileOpenDialog` with `FOS_PICKFOLDERS` (Vista+), falling back to
-    `SHBrowseForFolderW` with an edit box (XP).
+  - `modFolderPicker`: `IFileOpenDialog` with `FOS_PICKFOLDERS` (Vista+); if
+    `CoCreateInstance(CLSID_FileOpenDialog)` fails (XP: class not registered), falls back to
+    `SHBrowseForFolderW` with `BIF_NEWDIALOGSTYLE | BIF_EDITBOX` (XP), where `\\server\share`
+    can be typed into the edit box. `SHCreateItemFromParsingName` (Vista+) is only reached
+    on the first path.
 - **If compatibility can't be kept** for a feature (no reasonable fallback), the minimum
   Windows version is raised *in the build* - the EXE's OS/subsystem version in the PE header,
   so older Windows refuses to start it cleanly - instead of letting it fail at runtime. That

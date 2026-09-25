@@ -19,3 +19,8 @@ Initial development. Nothing released yet.
 - `modStrings` and `Resources/STRING/Strings.json`: localized UI (English as fallback, German).
 - `frmMain`: detected-folder list, explicit "send to Kodi", log, native Win32 status bar.
 - `frmSettings`: shares, poll interval, Kodi target with connection test.
+- `modFolderPicker` and a "..." button in `frmSettings`: pick a share folder in a dialog
+  (modern file dialog in folder mode, classic folder dialog as fallback); folders on mapped
+  network drives are converted to their UNC path.
+- `frmMain` remembers its size, position and maximized state (`[Window]` in the INI).
+- Own application icon.

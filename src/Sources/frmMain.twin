@@ -57,6 +57,36 @@ Class frmMain
 	Private Const PART_WIDTH_NEXT As Long = 2800
 
 	Private m_hStatusBar As LongPtr
+
+	' ---------------------------------------------------------------------------------
+	' Window placement (remembered in the INI, see RestoreWindowPlacement)
+	' ---------------------------------------------------------------------------------
+
+	Private Type POINTAPI
+		x As Long
+		y As Long
+	End Type
+
+	Private Type WINDOWPLACEMENT
+		length As Long
+		flags As Long
+		showCmd As Long
+		ptMinPosition As POINTAPI
+		ptMaxPosition As POINTAPI
+		rcNormalPosition As RECT
+	End Type
+
+	Private Declare PtrSafe Function GetWindowPlacement Lib "user32" (ByVal hWnd As LongPtr, _
+		ByRef lpwndpl As WINDOWPLACEMENT) As Long
+	Private Declare PtrSafe Function SetWindowPlacement Lib "user32" (ByVal hWnd As LongPtr, _
+		ByRef lpwndpl As WINDOWPLACEMENT) As Long
+
+	Private Const SW_HIDE As Long = 0
+	Private Const SW_SHOWMINIMIZED As Long = 2
+	Private Const SW_SHOWMAXIMIZED As Long = 3
+	Private Const WPF_RESTORETOMAXIMIZED As Long = 2
+	Private Const MIN_RESTORE_WIDTH_PX As Long = 200
+	Private Const MIN_RESTORE_HEIGHT_PX As Long = 150
 	Private m_PartText(0 To 3) As String   ' own copy of the part texts, see StatusText
 
 	' ---------------------------------------------------------------------------------
@@ -117,6 +147,8 @@ Class frmMain
 		m_SecondsToPoll = FIRST_POLL_DELAY_SECONDS
 		UpdateCountAndButtons
 
+		RestoreWindowPlacement
+
 		tmrPoll.Interval = TICK_MS
 		tmrPoll.Enabled = True
 		Exit Sub
@@ -142,6 +174,7 @@ Class frmMain
 
 	Private Sub Form_Unload(Cancel As Integer)
 		tmrPoll.Enabled = False
+		SaveWindowPlacement
 		If m_hStatusBar <> 0 Then
 			DestroyWindow m_hStatusBar
 			m_hStatusBar = 0
@@ -423,6 +456,78 @@ Class frmMain
 		txtLog.Text = s & Format$(Now, "hh:nn:ss") & "  " & text
 		txtLog.SelStart = Len(txtLog.Text)
 	End Sub
+
+	' --- window placement ---
+
+	' Called at the end of Form_Load, while the form is still hidden. Needs StartUpPosition =
+	' Manual in the designer - otherwise VB centers the window again when it is shown.
+	' SetWindowPlacement (rather than Move) because the saved values are restore bounds in
+	' workspace coordinates, exactly what GetWindowPlacement returned on close; Windows also
+	' moves a window back into view if it would end up completely off screen (monitor removed,
+	' resolution changed).
+	Private Sub RestoreWindowPlacement()
+		Dim wp As WINDOWPLACEMENT, f As Double, dpi As Long, w As Long, h As Long
+
+		If Not modAppConfig.WindowPlacementValid Then
+			' first start: centered on the primary screen
+			Me.Move (Screen.Width - Me.Width) / 2, (Screen.Height - Me.Height) / 2
+			Exit Sub
+		End If
+
+		' saved at a different display scaling: keep the same physical size
+		f = 1
+		dpi = CurrentDpi()
+		If modAppConfig.WindowDpi > 0 And dpi > 0 And modAppConfig.WindowDpi <> dpi Then
+			f = dpi / modAppConfig.WindowDpi
+		End If
+		w = CLng(modAppConfig.WindowWidth * f)
+		h = CLng(modAppConfig.WindowHeight * f)
+		If w < MIN_RESTORE_WIDTH_PX Or h < MIN_RESTORE_HEIGHT_PX Then Exit Sub
+
+		wp.length = LenB(wp)
+		If GetWindowPlacement(Me.hWnd, wp) = 0 Then Exit Sub
+		With wp.rcNormalPosition
+			.Left = CLng(modAppConfig.WindowLeft * f)
+			.Top = CLng(modAppConfig.WindowTop * f)
+			.Right = .Left + w
+			.Bottom = .Top + h
+		End With
+		wp.flags = 0
+		wp.showCmd = SW_HIDE           ' stay hidden - VB shows the form after Form_Load
+		SetWindowPlacement Me.hWnd, wp
+
+		If modAppConfig.WindowMaximized Then Me.WindowState = vbMaximized
+	End Sub
+
+	' Called from Form_Unload. Saves the restore bounds (also when closed maximized or
+	' minimized) and whether the window was maximized. A window closed while minimized opens
+	' normal (or maximized, if it was maximized before being minimized). Failures are
+	' ignored - the placement is a convenience.
+	Private Sub SaveWindowPlacement()
+		Dim wp As WINDOWPLACEMENT
+		On Error GoTo Done
+		wp.length = LenB(wp)
+		If GetWindowPlacement(Me.hWnd, wp) = 0 Then Exit Sub
+		With wp.rcNormalPosition
+			modAppConfig.WindowLeft = .Left
+			modAppConfig.WindowTop = .Top
+			modAppConfig.WindowWidth = .Right - .Left
+			modAppConfig.WindowHeight = .Bottom - .Top
+		End With
+		If wp.showCmd = SW_SHOWMINIMIZED Then
+			modAppConfig.WindowMaximized = ((wp.flags And WPF_RESTORETOMAXIMIZED) <> 0)
+		Else
+			modAppConfig.WindowMaximized = (wp.showCmd = SW_SHOWMAXIMIZED)
+		End If
+		modAppConfig.WindowDpi = CurrentDpi()
+		modAppConfig.SaveWindowPlacement
+	Done:
+	End Sub
+
+	' System DPI (the app is SYSTEM_DPI_AWARE, see project settings).
+	Private Function CurrentDpi() As Long
+		If Screen.TwipsPerPixelX > 0 Then CurrentDpi = CLng(1440 / Screen.TwipsPerPixelX)
+	End Function
 
 	' --- status bar ---
 

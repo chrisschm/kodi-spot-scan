@@ -1,0 +1,269 @@
+' COM interfaces for the Vista+ file dialog in folder mode. Only what modFolderPicker needs is
+' used, but every vtable slot up to the last used one must be declared, in Windows' order.
+' Pointer parameters that are not used (filter specs, events, GUIDs) are plain LongPtr, so no
+' further types are needed. HRESULT failures (including "cancelled" from Show) are raised as
+' errors with Err.Number = the HRESULT.
+
+[InterfaceId("43826D1E-E718-42EE-BC55-A1E261C37BFE")]
+Interface IShellItem Extends stdole.IUnknown
+	Sub BindToHandler(ByVal pbc As LongPtr, ByVal bhid As LongPtr, ByVal riid As LongPtr, ByRef ppv As LongPtr)
+	Sub GetParent(ByRef ppsi As IShellItem)
+	Sub GetDisplayName(ByVal sigdnName As Long, ByRef ppszName As LongPtr)
+	Sub GetAttributes(ByVal sfgaoMask As Long, ByRef psfgaoAttribs As Long)
+	Sub Compare(ByVal psi As IShellItem, ByVal hint As Long, ByRef piOrder As Long)
+End Interface
+
+' IFileDialog including its base IModalWindow (Show), declared flat on IUnknown.
+[InterfaceId("42F85136-DB7E-439C-85F1-E4075D135FC8")]
+Interface IFileDialog Extends stdole.IUnknown
+	Sub Show(ByVal hwndOwner As LongPtr)
+	Sub SetFileTypes(ByVal cFileTypes As Long, ByVal rgFilterSpec As LongPtr)
+	Sub SetFileTypeIndex(ByVal iFileType As Long)
+	Sub GetFileTypeIndex(ByRef piFileType As Long)
+	Sub Advise(ByVal pfde As LongPtr, ByRef pdwCookie As Long)
+	Sub Unadvise(ByVal dwCookie As Long)
+	Sub SetOptions(ByVal fos As Long)
+	Sub GetOptions(ByRef pfos As Long)
+	Sub SetDefaultFolder(ByVal psi As IShellItem)
+	Sub SetFolder(ByVal psi As IShellItem)
+	Sub GetFolder(ByRef ppsi As IShellItem)
+	Sub GetCurrentSelection(ByRef ppsi As IShellItem)
+	Sub SetFileName(ByVal pszName As LongPtr)
+	Sub GetFileName(ByRef pszName As LongPtr)
+	Sub SetTitle(ByVal pszTitle As LongPtr)
+	Sub SetOkButtonLabel(ByVal pszText As LongPtr)
+	Sub SetFileNameLabel(ByVal pszLabel As LongPtr)
+	Sub GetResult(ByRef ppsi As IShellItem)
+End Interface
+
+Module modFolderPicker
+
+	' Folder selection dialog for frmSettings (the "..." button next to the share path).
+	'
+	' Preferred: the modern file dialog in folder mode (IFileOpenDialog + FOS_PICKFOLDERS,
+	' Windows Vista and later). It looks and works like the file dialog: \\server\ can be typed
+	' into the address bar, so shares work without a mapped drive and without network
+	' discovery. If the class can't be created (Windows XP), the classic SHBrowseForFolderW
+	' dialog with an edit box is used instead - no version check, "try the feature, else fall
+	' back", see "Windows version compatibility" in docs/ARCHITECTURE.md.
+	'
+	' The result is a file system path as the dialog returns it (may be a mapped drive such as
+	' Z:\Filme); ToUncPath turns it into the UNC path modPathTranslator needs.
+
+	Private Type ComGuid
+		Data1 As Long
+		Data2 As Integer
+		Data3 As Integer
+		Data4(0 To 7) As Byte
+	End Type
+
+	Private Type BROWSEINFOW
+		hwndOwner As LongPtr
+		pidlRoot As LongPtr
+		pszDisplayName As LongPtr
+		lpszTitle As LongPtr
+		ulFlags As Long
+		lpfn As LongPtr
+		lParam As LongPtr
+		iImage As Long
+	End Type
+
+	Private Declare PtrSafe Function CLSIDFromString Lib "ole32" (ByVal lpsz As LongPtr, ByRef pclsid As ComGuid) As Long
+	Private Declare PtrSafe Function CoCreateInstance Lib "ole32" (ByRef rclsid As ComGuid, _
+		ByVal pUnkOuter As LongPtr, ByVal dwClsContext As Long, ByRef riid As ComGuid, ByRef ppv As Any) As Long
+	Private Declare PtrSafe Sub CoTaskMemFree Lib "ole32" (ByVal pv As LongPtr)
+	' Vista+; only reached after CoCreateInstance(FileOpenDialog) succeeded, i.e. never on XP.
+	Private Declare PtrSafe Function SHCreateItemFromParsingName Lib "shell32" (ByVal pszPath As LongPtr, _
+		ByVal pbc As LongPtr, ByRef riid As ComGuid, ByRef ppv As Any) As Long
+	Private Declare PtrSafe Function SHBrowseForFolderW Lib "shell32" (ByRef lpbi As BROWSEINFOW) As LongPtr
+	Private Declare PtrSafe Function SHGetPathFromIDListW Lib "shell32" (ByVal pidl As LongPtr, _
+		ByVal pszPath As LongPtr) As Long
+	Private Declare PtrSafe Function WNetGetUniversalNameW Lib "mpr" (ByVal lpLocalPath As LongPtr, _
+		ByVal dwInfoLevel As Long, ByVal lpBuffer As LongPtr, ByRef lpBufferSize As Long) As Long
+	Private Declare PtrSafe Function SendMessageW Lib "user32" (ByVal hWnd As LongPtr, ByVal wMsg As Long, _
+		ByVal wParam As LongPtr, ByVal lParam As LongPtr) As LongPtr
+	Private Declare PtrSafe Function lstrlenW Lib "kernel32" (ByVal lpString As LongPtr) As Long
+	Private Declare PtrSafe Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (ByRef Destination As Any, _
+		ByRef Source As Any, ByVal Length As LongPtr)
+
+	Private Const CLSID_FILE_OPEN_DIALOG As String = "{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}"
+	Private Const IID_IFILE_DIALOG As String = "{42F85136-DB7E-439C-85F1-E4075D135FC8}"
+	Private Const IID_ISHELL_ITEM As String = "{43826D1E-E718-42EE-BC55-A1E261C37BFE}"
+	Private Const CLSCTX_INPROC_SERVER As Long = 1
+
+	Private Const FOS_NOCHANGEDIR As Long = &H8
+	Private Const FOS_PICKFOLDERS As Long = &H20
+	Private Const FOS_FORCEFILESYSTEM As Long = &H40
+	Private Const FOS_PATHMUSTEXIST As Long = &H800
+	Private Const SIGDN_FILESYSPATH As Long = &H80058000
+
+	Private Const BIF_RETURNONLYFSDIRS As Long = &H1
+	Private Const BIF_EDITBOX As Long = &H10
+	Private Const BIF_NEWDIALOGSTYLE As Long = &H40
+	Private Const BFFM_INITIALIZED As Long = 1
+	Private Const BFFM_SETSELECTIONW As Long = &H467     ' WM_USER + 103
+	Private Const MAX_PATH As Long = 260
+
+	Private Const UNIVERSAL_NAME_INFO_LEVEL As Long = 1
+	Private Const ERROR_MORE_DATA As Long = 234
+
+	Private Enum PickResult
+		pickOk
+		pickCancelled
+		pickUnavailable
+	End Enum
+
+	Private m_BrowseStart As String        ' kept alive while the classic dialog runs (callback lpData)
+
+	' Shows the folder dialog. Returns True and the chosen file system path in pickedPath, or
+	' False if the user cancelled. startPath (may be empty or unreachable) is only a hint.
+	Public Function PickFolder(ByVal hwndOwner As LongPtr, ByVal title As String, ByVal startPath As String, _
+			ByRef pickedPath As String) As Boolean
+		Dim r As PickResult
+		pickedPath = ""
+		r = PickWithFileDialog(hwndOwner, title, startPath, pickedPath)
+		If r = pickUnavailable Then r = PickWithBrowseDialog(hwndOwner, title, startPath, pickedPath)
+		PickFolder = (r = pickOk) And (Len(pickedPath) > 0)
+	End Function
+
+	' UNC form of a folder path: UNC input is returned normalized, a folder on a mapped network
+	' drive is resolved via WNetGetUniversalNameW. Returns "" for anything that is not on a
+	' network share (local or substituted drives, disconnected mappings).
+	Public Function ToUncPath(ByVal path As String) As String
+		Dim buf() As Byte, size As Long, rc As Long, p As LongPtr
+
+		path = modPathTranslator.NormalizeFolder(path)
+		If modPathTranslator.IsUncPath(path) Then
+			ToUncPath = path
+			Exit Function
+		End If
+		If Len(path) < 2 Then Exit Function
+		If Mid$(path, 2, 1) <> ":" Then Exit Function
+		If Len(path) = 2 Then path = path & "\"          ' drive root: "Z:" -> "Z:\"
+
+		size = 1024
+		ReDim buf(0 To size - 1)
+		rc = WNetGetUniversalNameW(StrPtr(path), UNIVERSAL_NAME_INFO_LEVEL, VarPtr(buf(0)), size)
+		If rc = ERROR_MORE_DATA Then
+			ReDim buf(0 To size - 1)
+			rc = WNetGetUniversalNameW(StrPtr(path), UNIVERSAL_NAME_INFO_LEVEL, VarPtr(buf(0)), size)
+		End If
+		If rc <> 0 Then Exit Function
+
+		' UNIVERSAL_NAME_INFO = { LPWSTR lpUniversalName }, the string follows in the same buffer
+		CopyMemory p, buf(0), LenB(p)
+		path = modPathTranslator.NormalizeFolder(PtrToString(p))
+		If modPathTranslator.IsUncPath(path) Then ToUncPath = path
+	End Function
+
+	' ---------------------------------------------------------------------------------
+	' Vista+: IFileOpenDialog in folder mode
+	' ---------------------------------------------------------------------------------
+
+	Private Function PickWithFileDialog(ByVal hwndOwner As LongPtr, ByVal title As String, _
+			ByVal startPath As String, ByRef pickedPath As String) As PickResult
+		Dim dlg As IFileDialog, item As IShellItem, startItem As IShellItem
+		Dim clsid As ComGuid, iid As ComGuid, opts As Long, pName As LongPtr, shown As Boolean
+
+		CLSIDFromString StrPtr(CLSID_FILE_OPEN_DIALOG), clsid
+		CLSIDFromString StrPtr(IID_IFILE_DIALOG), iid
+		If CoCreateInstance(clsid, 0, CLSCTX_INPROC_SERVER, iid, dlg) <> 0 Or dlg Is Nothing Then
+			PickWithFileDialog = pickUnavailable          ' XP: class not registered
+			Exit Function
+		End If
+
+		On Error GoTo Failed
+		dlg.GetOptions opts
+		dlg.SetOptions opts Or FOS_PICKFOLDERS Or FOS_FORCEFILESYSTEM Or FOS_PATHMUSTEXIST Or FOS_NOCHANGEDIR
+		If Len(title) > 0 Then dlg.SetTitle StrPtr(title)
+
+		If Len(startPath) > 0 Then
+			' only a hint: an unreachable or invalid start folder is simply ignored
+			On Error Resume Next
+			CLSIDFromString StrPtr(IID_ISHELL_ITEM), iid
+			If SHCreateItemFromParsingName(StrPtr(startPath), 0, iid, startItem) = 0 Then
+				If Not startItem Is Nothing Then dlg.SetFolder startItem
+			End If
+			On Error GoTo Failed
+		End If
+
+		shown = True
+		dlg.Show hwndOwner            ' raises HRESULT_FROM_WIN32(ERROR_CANCELLED) on Cancel
+		dlg.GetResult item
+		item.GetDisplayName SIGDN_FILESYSPATH, pName
+		pickedPath = PtrToString(pName)
+		CoTaskMemFree pName
+		PickWithFileDialog = pickOk
+		Exit Function
+
+	Failed:
+		' before Show: the dialog is unusable -> classic fallback; after Show: cancelled
+		If shown Then
+			PickWithFileDialog = pickCancelled
+		Else
+			PickWithFileDialog = pickUnavailable
+		End If
+	End Function
+
+	' ---------------------------------------------------------------------------------
+	' Fallback (XP): SHBrowseForFolderW with edit box - \\server\share can be typed in there
+	' ---------------------------------------------------------------------------------
+
+	Private Function PickWithBrowseDialog(ByVal hwndOwner As LongPtr, ByVal title As String, _
+			ByVal startPath As String, ByRef pickedPath As String) As PickResult
+		Dim bi As BROWSEINFOW, pidl As LongPtr, displayName As String, buf As String
+
+		displayName = String$(MAX_PATH, vbNullChar)
+		bi.hwndOwner = hwndOwner
+		bi.pszDisplayName = StrPtr(displayName)
+		bi.lpszTitle = StrPtr(title)
+		bi.ulFlags = BIF_RETURNONLYFSDIRS Or BIF_EDITBOX Or BIF_NEWDIALOGSTYLE
+		m_BrowseStart = startPath
+		If Len(m_BrowseStart) > 0 Then
+			bi.lpfn = FuncPtr(AddressOf BrowseCallbackProc)
+			bi.lParam = StrPtr(m_BrowseStart)
+		End If
+
+		pidl = SHBrowseForFolderW(bi)
+		m_BrowseStart = ""
+		If pidl = 0 Then
+			PickWithBrowseDialog = pickCancelled
+			Exit Function
+		End If
+
+		buf = String$(MAX_PATH, vbNullChar)
+		If SHGetPathFromIDListW(pidl, StrPtr(buf)) <> 0 Then
+			pickedPath = Left$(buf, lstrlenW(StrPtr(buf)))
+			PickWithBrowseDialog = pickOk
+		Else
+			PickWithBrowseDialog = pickCancelled
+		End If
+		CoTaskMemFree pidl
+	End Function
+
+	' Preselects the start folder once the classic dialog is up (lpData = StrPtr of the path).
+	Private Function BrowseCallbackProc(ByVal hWnd As LongPtr, ByVal uMsg As Long, ByVal lParam As LongPtr, _
+			ByVal lpData As LongPtr) As Long
+		If uMsg = BFFM_INITIALIZED And lpData <> 0 Then
+			SendMessageW hWnd, BFFM_SETSELECTIONW, 1, lpData
+		End If
+	End Function
+
+	' ---------------------------------------------------------------------------------
+	' Helpers
+	' ---------------------------------------------------------------------------------
+
+	Private Function FuncPtr(ByVal p As LongPtr) As LongPtr
+		FuncPtr = p
+	End Function
+
+	Private Function PtrToString(ByVal p As LongPtr) As String
+		Dim n As Long
+		If p = 0 Then Exit Function
+		n = lstrlenW(p)
+		If n = 0 Then Exit Function
+		PtrToString = String$(n, vbNullChar)
+		CopyMemory ByVal StrPtr(PtrToString), ByVal p, n * 2
+	End Function
+
+End Module

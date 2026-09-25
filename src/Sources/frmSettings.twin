@@ -91,6 +91,31 @@ Class frmSettings
 		UpdateButtons
 	End Sub
 
+	' "..." next to txtShare: pick a folder (modFolderPicker) and add it right away. A folder
+	' on a mapped network drive is converted to its UNC path; local folders are rejected.
+	Private Sub cmdBrowseShare_Click()
+		Dim startPath As String, picked As String, p As String
+
+		startPath = Trim$(txtShare.Text)
+		If Len(startPath) = 0 And lstShares.ListIndex >= 0 Then startPath = lstShares.List(lstShares.ListIndex)
+		If Len(startPath) = 0 And lstShares.ListCount > 0 Then startPath = lstShares.List(lstShares.ListCount - 1)
+
+		If Not modFolderPicker.PickFolder(Me.hWnd, Res(rid_frmSettings_BrowseShare_Title), startPath, picked) Then
+			Exit Sub
+		End If
+
+		Me.MousePointer = vbHourglass
+		p = modFolderPicker.ToUncPath(picked)
+		Me.MousePointer = vbDefault
+		If Len(p) = 0 Then
+			MsgBox Res(rid_frmSettings_Err_BrowseNotShare, picked, Environ$("COMPUTERNAME")), vbExclamation, Me.Caption
+			Exit Sub
+		End If
+
+		txtShare.Text = p
+		cmdAddShare_Click          ' same checks as a typed path (UNC, duplicate, reachable)
+	End Sub
+
 	Private Sub cmdRemoveShare_Click()
 		Dim i As Long
 		i = lstShares.ListIndex
@@ -200,6 +225,8 @@ Class frmSettings
 		Me.Caption = Res(rid_frmSettings_Caption)
 		fraShares.Caption = Res(rid_frmSettings_fraShares_Caption)
 		cmdAddShare.Caption = Res(rid_frmSettings_cmdAddShare_Caption)
+		cmdBrowseShare.Caption = Res(rid_frmSettings_cmdBrowseShare_Caption)
+		cmdBrowseShare.ToolTipText = Res(rid_frmSettings_cmdBrowseShare_ToolTip)
 		cmdRemoveShare.Caption = Res(rid_frmSettings_cmdRemoveShare_Caption)
 		fraWatcher.Caption = Res(rid_frmSettings_fraWatcher_Caption)
 		lblPollInterval.Caption = Res(rid_frmSettings_lblPollInterval_Caption)

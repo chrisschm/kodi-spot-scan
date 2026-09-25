@@ -50,12 +50,16 @@ Module modStrings
 		rid_frmSettings_cmdTestConnection_Caption= 2009
 		rid_frmSettings_cmdOK_Caption            = 2010
 		rid_frmSettings_cmdCancel_Caption        = 2011
+		rid_frmSettings_cmdBrowseShare_Caption   = 2012
+		rid_frmSettings_cmdBrowseShare_ToolTip   = 2013
+		rid_frmSettings_BrowseShare_Title        = 2014
 		rid_frmSettings_Err_ShareNotUnc          = 2020
 		rid_frmSettings_Err_ShareDuplicate       = 2021
 		rid_frmSettings_Ask_ShareUnreachable     = 2022
 		rid_frmSettings_Err_PollInterval         = 2023
 		rid_frmSettings_Err_Port                 = 2024
 		rid_frmSettings_Err_Save                 = 2025
+		rid_frmSettings_Err_BrowseNotShare       = 2026
 		rid_frmSettings_Test_Running             = 2030
 		rid_frmSettings_Test_Ok                  = 2031
 		rid_frmSettings_Test_Failed              = 2032

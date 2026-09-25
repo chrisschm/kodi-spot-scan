@@ -21,6 +21,15 @@ Module modAppConfig
 	'   Count=2
 	'   Share1=\\ds\video\Filme
 	'   Share2=\\ds\video\Serien
+	'   [Window]
+	'   Left=100
+	'   Top=80
+	'   Width=900
+	'   Height=600
+	'   Maximized=0
+	'   Dpi=96
+	' [Window] is the main window's restore bounds in pixels (as GetWindowPlacement reports
+	' them) plus the DPI they were taken at; it is written only by SaveWindowPlacement.
 
 	Private Declare PtrSafe Function GetPrivateProfileStringW Lib "kernel32" ( _
 		ByVal lpAppName As LongPtr, ByVal lpKeyName As LongPtr, ByVal lpDefault As LongPtr, _
@@ -43,6 +52,7 @@ Module modAppConfig
 	Private Const SECTION_KODI As String = "Kodi"
 	Private Const SECTION_WATCHER As String = "Watcher"
 	Private Const SECTION_SHARES As String = "Shares"
+	Private Const SECTION_WINDOW As String = "Window"
 
 	' Current settings. Filled by LoadConfig, written by SaveConfig.
 	' KodiHost is empty until configured - the Kodi target is never assumed to be localhost.
@@ -51,6 +61,16 @@ Module modAppConfig
 	Public KodiTimeoutSeconds As Long
 	Public PollIntervalSeconds As Long
 	Public Shares As Collection            ' of String, UNC folder paths
+
+	' Main window placement (restore bounds, pixels). WindowPlacementValid = False until a
+	' placement was saved once - frmMain then uses its default position.
+	Public WindowPlacementValid As Boolean
+	Public WindowLeft As Long
+	Public WindowTop As Long
+	Public WindowWidth As Long
+	Public WindowHeight As Long
+	Public WindowMaximized As Boolean
+	Public WindowDpi As Long
 
 	' %APPDATA%\kodi-spot-scan - created on first use.
 	Public Function ConfigFolder() As String
@@ -88,6 +108,7 @@ Module modAppConfig
 		KodiTimeoutSeconds = DEFAULT_KODI_TIMEOUT_SECONDS
 		PollIntervalSeconds = DEFAULT_POLL_INTERVAL_SECONDS
 		Set Shares = New Collection
+		WindowPlacementValid = False
 	End Sub
 
 	' Loads all settings; missing or invalid values fall back to defaults.
@@ -108,6 +129,29 @@ Module modAppConfig
 			s = Trim$(ReadIni(f, SECTION_SHARES, "Share" & CStr(i), ""))
 			If Len(s) > 0 Then Shares.Add s
 		Next
+
+		WindowLeft = ParseLong(ReadIni(f, SECTION_WINDOW, "Left", ""), 0)
+		WindowTop = ParseLong(ReadIni(f, SECTION_WINDOW, "Top", ""), 0)
+		WindowWidth = ParseLong(ReadIni(f, SECTION_WINDOW, "Width", ""), 0)
+		WindowHeight = ParseLong(ReadIni(f, SECTION_WINDOW, "Height", ""), 0)
+		WindowMaximized = (ParseLong(ReadIni(f, SECTION_WINDOW, "Maximized", ""), 0) <> 0)
+		WindowDpi = ParseLong(ReadIni(f, SECTION_WINDOW, "Dpi", ""), 0)
+		WindowPlacementValid = (WindowWidth > 0 And WindowHeight > 0)
+	End Sub
+
+	' Writes only the [Window] section (called by frmMain on close), so it never touches
+	' settings the user is editing. Raises an error if the file can't be written.
+	Public Sub SaveWindowPlacement()
+		Dim f As String
+		f = ConfigFilePath()
+		EnsureUnicodeIniFile f
+		WriteIni f, SECTION_WINDOW, "Left", CStr(WindowLeft)
+		WriteIni f, SECTION_WINDOW, "Top", CStr(WindowTop)
+		WriteIni f, SECTION_WINDOW, "Width", CStr(WindowWidth)
+		WriteIni f, SECTION_WINDOW, "Height", CStr(WindowHeight)
+		WriteIni f, SECTION_WINDOW, "Maximized", IIf(WindowMaximized, "1", "0")
+		WriteIni f, SECTION_WINDOW, "Dpi", CStr(WindowDpi)
+		WindowPlacementValid = True
 	End Sub
 
 	' Writes all settings. Raises an error if the file can't be written.
