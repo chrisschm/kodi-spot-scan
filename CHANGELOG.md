@@ -1,7 +1,9 @@
 # Changelog
 
+## unreleased
+
 ## 0.1.0
-### 26.09.2026
+### 26.09.2026 ([a74480f](https://github.com/chrisschm/kodi-spot-scan/commit/a74480fa8d5a3e651e13e11f3bb325c92a8ea452))
 
 1. New
  - `modPathTranslator`: UNC <-> `smb://` folder path conversion.
